@@ -3,10 +3,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSortFilterProxyModel, Qt, Signal
-from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLineEdit, QMainWindow, QMessageBox,
-                               QProgressBar, QPushButton, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from .. import config, importer, manual
@@ -15,14 +14,10 @@ from ..deezer import DeezerPublic
 from ..downloader import Downloader
 from ..library import Library
 from ..spotify import Spotify, is_spotify_link
-from .dialogs import ImportDialog, SearchDialog, SettingsDialog, fmt_duration
+from .dialogs import ImportDialog, SearchDialog, SettingsDialog
+from .library_panel import LibraryPanel
 
-SORT_ROLE = Qt.UserRole + 1
-DURATION_WARNING = 10  # s d'écart avec la durée attendue : radio edit, clip, mauvaise version
-BADGE_COLORS = {"Lossless": "#2e7d32", "320": "#558b2f", "256": "#9e9d24", "192": "#ef6c00", "128": "#c62828",
-                "Faux FLAC": "#c62828", "Transcode": "#c62828"}
 STATUS = {"queued": "En attente", "running": "En cours", "done": "Terminé", "failed": "Échec"}
-TRACK_COLUMNS = ("Artiste", "Titre", "Qualité", "Durée", "BPM", "Format", "Album", "Ajouté le")
 
 
 class Bridge(QObject):
@@ -34,13 +29,6 @@ class Bridge(QObject):
     manual_progress = Signal(int, int)
     track_added = Signal(int)
     manual_done = Signal(int, int, object)  # ajoutés, déjà présents, erreurs
-
-
-def _item(text, sort=None) -> QStandardItem:
-    item = QStandardItem("" if text is None else str(text))
-    item.setEditable(False)
-    item.setData(sort if sort is not None else item.text().casefold(), SORT_ROLE)
-    return item
 
 
 class MainWindow(QMainWindow):
@@ -62,7 +50,6 @@ class MainWindow(QMainWindow):
         self.bridge.preview_failed.connect(self._on_preview_failed)
         self.bridge.manual_progress.connect(
             lambda i, n: self.statusBar().showMessage(f"Ajout et analyse : {i}/{n} fichiers…"))
-        self.bridge.track_added.connect(self._show_track)
         self.bridge.manual_done.connect(self._on_manual_done)
         self.setAcceptDrops(True)
 
@@ -76,7 +63,9 @@ class MainWindow(QMainWindow):
         top.addWidget(QPushButton("Réglages", clicked=self._open_settings))
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._library_tab(), "Bibliothèque")
+        self.panel = LibraryPanel(lib)
+        self.bridge.track_added.connect(self.panel.show_track)
+        self.tabs.addTab(self.panel, "Bibliothèque")
         self.queue = self._table(("Piste", "Qualité", "Statut", "Progression"))
         self.tabs.addTab(self.queue, "File d'attente")
         self.tabs.addTab(self._failures_tab(), "Échecs")
@@ -88,9 +77,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._job_rows: dict[int, int] = {}
-        self._track_ids: set[int] = set()
-        for row in lib.tracks():
-            self._add_track_row(row)
         self._reload_failures()
 
     # --- construction
@@ -104,28 +90,6 @@ class MainWindow(QMainWindow):
         t.verticalHeader().hide()
         return t
 
-    def _library_tab(self) -> QWidget:
-        self.model = QStandardItemModel(0, len(TRACK_COLUMNS))
-        self.model.setHorizontalHeaderLabels(TRACK_COLUMNS)
-        self.proxy = QSortFilterProxyModel(filterKeyColumn=-1, sortRole=SORT_ROLE)
-        self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        self.proxy.setSourceModel(self.model)
-        search = QLineEdit(placeholderText="Rechercher (artiste, titre, album, qualité…)")
-        search.textChanged.connect(self.proxy.setFilterFixedString)
-        view = QTableView(sortingEnabled=True)
-        view.setModel(self.proxy)
-        view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        view.verticalHeader().hide()
-        view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        for col, width in enumerate((200, 280, 90, 70, 60, 70, 200)):
-            view.setColumnWidth(col, width)
-        view.sortByColumn(7, Qt.DescendingOrder)
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.addWidget(search)
-        layout.addWidget(view)
-        return w
-
     def _failures_tab(self) -> QWidget:
         self.failures = self._table(("Piste", "Code", "Message"))
         self.failures.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -138,27 +102,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.failures)
         layout.addLayout(buttons)
         return w
-
-    def _show_track(self, track_id: int):
-        if track_id not in self._track_ids:
-            self._add_track_row(self.lib.track(track_id))
-
-    def _add_track_row(self, t):
-        self._track_ids.add(t["id"])
-        duration = _item(fmt_duration(t["duration"]), t["duration"] or 0)
-        if t["expected_duration"] and t["duration"] and abs(t["duration"] - t["expected_duration"]) > DURATION_WARNING:
-            duration.setText("⚠ " + duration.text())
-            duration.setToolTip(f"Durée attendue : {fmt_duration(t['expected_duration'])}")
-        quality = _item(t["badge"] or "?")
-        quality.setToolTip(" · ".join(str(v) for v in (t["real_quality"], t["max_frequency"] and
-                                                         f"coupure {t['max_frequency']} Hz") if v))
-        if t["badge"] in BADGE_COLORS:
-            quality.setForeground(QColor(BADGE_COLORS[t["badge"]]))
-        self.model.appendRow([
-            _item(t["artist"]), _item(t["title"]), quality, duration,
-            _item(f"{t['bpm']:.0f}" if t["bpm"] else "", t["bpm"] or 0), _item(t["format"]), _item(t["album"]),
-            _item(t["added_at"].replace("T", " "), t["added_at"]),
-        ])
 
     # --- API et réglages
     def _ensure_api(self) -> bool:
@@ -212,6 +155,7 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         job_ids = importer.queue(self.lib, p, dlg.quality.currentText())
+        self.panel.refresh_playlists()
         self.downloader.submit(job_ids)
         self.link.clear()
         self.statusBar().showMessage(f"« {p.title} » : {len(job_ids)} pistes en file, {len(p.existing)} déjà là", 8000)
@@ -300,7 +244,7 @@ class MainWindow(QMainWindow):
             bar.setValue(0)
         elif job["status"] == "done":
             bar.setValue(100)
-            self._show_track(job["track_id"])
+            self.panel.show_track(job["track_id"])
         if job["status"] in ("queued", "failed"):
             self._reload_failures()
 

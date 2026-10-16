@@ -41,9 +41,10 @@ d'autre, copie ses titres dans une playlist à toi. Les albums fonctionnent tous
 | `manual.py` | ajout manuel (glisser-déposer, scan) : même dédoublonnage, copie dans RAW |
 | `files.py` | écriture dans RAW sans jamais écraser |
 | `tags.py` | lecture des tags (jamais d'écriture) |
+| `smart.py` | règles des playlists intelligentes -> SQL paramétré |
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
 | `quality/badge.py` | badge unique 128 / 192 / 256 / 320 / Lossless / Faux FLAC / Transcode |
-| `ui/` | interface PySide6 |
+| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags) |
 
 Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titre normalisés ± 3 s.
 Jamais par nom de fichier. Une piste Spotify est téléchargée par `/download?url=` ; si le bot ne la trouve pas,
@@ -61,13 +62,23 @@ Validation contre la CLI d'origine (`tools/compare_whatsmybitrate.py`) sur 20 fi
 MP3 128/192/256/320/V0, AAC, Vorbis, faux FLAC issus de MP3 128 et 192, MP3 128 réencodé en 320 :
 **20/20 identiques**, fréquences de coupure comprises.
 
+## Organisation pour les sets
+
+- **Tags libres** (genre, énergie, moment du set…) : clic droit sur une sélection → *Ajouter des tags…*,
+  *Retirer le tag*. Insensibles à la casse.
+- **Playlists** dans la colonne de gauche : manuelles (♪, clic droit sur des sons → *Ajouter à la playlist*),
+  importées (↻, resynchronisées à chaque nouvel import du lien) et intelligentes (⚙, règles sur tag, BPM, durée,
+  qualité, artiste, titre, album, format, source ; « toutes » ou « au moins une »), évaluées à l'affichage.
+  Une playlist ne contient que des références : la supprimer ne touche jamais aux sons.
+- **Filtres rapides** : recherche multi-mots (artiste, titre, album, tags), tag, qualité, plage de BPM.
+
 ## Feuille de route
 
 1. ~~MVP : lien Deezer → téléchargement dans RAW avec dédoublonnage → liste avec badge qualité~~
 2. ~~Spotify (API Spotify → `/download?url=`, repli `/search` par durée la plus proche)~~
 3. ~~Ajout manuel (glisser-déposer, scan) + analyse qualité locale portée de
    [whatsmybitrate](https://github.com/oren-cohen/whatsmybitrate) (MIT), validée contre la CLI d'origine~~
-4. Tags, playlists manuelles et intelligentes, filtres
+4. ~~Tags, playlists manuelles et intelligentes, filtres~~
 5. Remplacement d'un son par une meilleure version (même ID interne)
 6. Export rekordbox.xml (+ option FLAC → AIFF)
 7. Paquet PyInstaller avec ffmpeg embarqué

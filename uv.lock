@@ -166,7 +166,7 @@ requires-dist = [
     { name = "keyring", specifier = ">=25" },
     { name = "mutagen", specifier = ">=1.47" },
     { name = "numpy", specifier = ">=2" },
-    { name = "pyside6", specifier = ">=6.8" },
+    { name = "pyside6", specifier = ">=6.9" },
 ]
 
 [package.metadata.requires-dev]

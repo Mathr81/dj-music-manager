@@ -1,12 +1,14 @@
 """Bibliothèque SQLite : sons, ID externes, playlists, tags, file de téléchargement, réglages."""
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from .dedup import norm_key, same_duration
+from . import smart
+from .dedup import norm_key, norm_text, same_duration
 
 # une entrée par version du schéma, appliquée selon PRAGMA user_version
 MIGRATIONS = [
@@ -191,9 +193,84 @@ class Library:
             db.execute("INSERT INTO playlist_tracks VALUES(?, ?, ?) "
                        "ON CONFLICT DO UPDATE SET position = excluded.position", (playlist_id, track_id, position))
 
+    def playlists(self) -> list[sqlite3.Row]:
+        return self._all("SELECT * FROM playlists ORDER BY name COLLATE NOCASE")
+
+    def playlist(self, playlist_id: int) -> sqlite3.Row | None:
+        return self._one("SELECT * FROM playlists WHERE id = ?", playlist_id)
+
+    def create_playlist(self, name: str, rules: dict | None = None) -> int:
+        """Playlist manuelle, ou intelligente si des règles sont données."""
+        if rules is not None:
+            smart.where(rules)  # refuse des règles invalides avant de les enregistrer
+        with self._tx() as db:
+            return db.execute("INSERT INTO playlists(name, kind, rules_json, created_at) VALUES(?, ?, ?, ?)",
+                              (name, "manual" if rules is None else "smart",
+                               None if rules is None else json.dumps(rules), _now())).lastrowid
+
+    def update_playlist(self, playlist_id: int, name: str, rules: dict | None = None):
+        if rules is not None:
+            smart.where(rules)
+        with self._tx() as db:
+            db.execute("UPDATE playlists SET name = ?, rules_json = COALESCE(?, rules_json) WHERE id = ?",
+                       (name, None if rules is None else json.dumps(rules), playlist_id))
+
+    def delete_playlist(self, playlist_id: int):
+        """Supprime la playlist (des références) ; les sons et leurs fichiers restent."""
+        with self._tx() as db:
+            db.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+
+    def add_to_playlist(self, playlist_id: int, track_ids: list[int]):
+        """Ajoute en fin de playlist ; un son déjà présent garde sa place."""
+        with self._tx() as db:
+            last = db.execute("SELECT IFNULL(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?",
+                              (playlist_id,)).fetchone()[0]
+            db.executemany("INSERT OR IGNORE INTO playlist_tracks VALUES(?, ?, ?)",
+                           [(playlist_id, t, last + 1 + i) for i, t in enumerate(track_ids)])
+
+    def remove_from_playlist(self, playlist_id: int, track_ids: list[int]):
+        with self._tx() as db:
+            db.executemany("DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+                           [(playlist_id, t) for t in track_ids])
+
     def playlist_track_ids(self, playlist_id: int) -> list[int]:
-        rows = self._all("SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position", playlist_id)
+        """Sons dans l'ordre de la playlist ; pour une intelligente, évaluation des règles (artiste, titre)."""
+        p = self.playlist(playlist_id)
+        if p is None:
+            return []
+        if p["kind"] == "smart":
+            sql, params = smart.where(json.loads(p["rules_json"]))
+            rows = self._all(f"SELECT id FROM tracks WHERE {sql} "
+                             "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE", *params)
+        else:
+            rows = self._all("SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position",
+                             playlist_id)
         return [r[0] for r in rows]
+
+    # --- tags
+    def tags(self) -> list[str]:
+        """Triés sans accents ni casse (NOCASE de SQLite classerait « Énergie » après « warmup »)."""
+        return sorted((r[0] for r in self._all("SELECT name FROM tags")), key=norm_text)
+
+    def tags_by_track(self) -> dict[int, list[str]]:
+        out: dict[int, list[str]] = {}
+        for r in self._all("SELECT track_id, name FROM track_tags JOIN tags ON tags.id = tag_id"):
+            out.setdefault(r[0], []).append(r[1])
+        return {t: sorted(names, key=norm_text) for t, names in out.items()}
+
+    def add_tags(self, track_ids: list[int], names: list[str]):
+        names = [n.strip() for n in names if n.strip()]
+        with self._tx() as db:
+            for name in names:
+                db.execute("INSERT OR IGNORE INTO tags(name) VALUES(?)", (name,))  # nom insensible à la casse
+                tag_id = db.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()[0]
+                db.executemany("INSERT OR IGNORE INTO track_tags VALUES(?, ?)", [(t, tag_id) for t in track_ids])
+
+    def remove_tag(self, track_ids: list[int], name: str):
+        with self._tx() as db:
+            db.executemany("DELETE FROM track_tags WHERE track_id = ? AND tag_id = (SELECT id FROM tags WHERE name = ?)",
+                           [(t, name) for t in track_ids])
+            db.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM track_tags)")  # plus utilisé par aucun son
 
     # --- file de téléchargement
     def add_jobs(self, jobs: list[dict]) -> list[int]:
