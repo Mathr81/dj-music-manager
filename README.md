@@ -11,7 +11,8 @@ uv run dj-music-manager      # ou : uv run python -m dj_music_manager
 uv run pytest                # tests (ffmpeg dans le PATH pour le test de bout en bout)
 ```
 
-Au premier lancement : **Réglages** → dossier RAW, qualité par défaut (`mp3_320`), clé API.
+Au premier lancement : **Réglages** → dossier RAW, qualité par défaut (`mp3_320`), URL et clé de l'API,
+et éventuellement le dossier de ffmpeg/ffprobe (sinon ceux du PATH).
 La clé est stockée dans le Gestionnaire d'identifiants Windows, jamais dans le code ni la base.
 La base est dans `%APPDATA%\dj-music-manager\library.db`.
 
@@ -37,7 +38,10 @@ d'autre, copie ses titres dans une playlist à toi. Les albums fonctionnent tous
 | `library.py` | SQLite : schéma, migrations (`PRAGMA user_version`), requêtes |
 | `importer.py` | aperçu dédoublonné d'un lien, création des jobs |
 | `downloader.py` | 4 téléchargements simultanés, échecs isolés et relançables |
+| `manual.py` | ajout manuel (glisser-déposer, scan) : même dédoublonnage, copie dans RAW |
+| `files.py` | écriture dans RAW sans jamais écraser |
 | `tags.py` | lecture des tags (jamais d'écriture) |
+| `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
 | `quality/badge.py` | badge unique 128 / 192 / 256 / 320 / Lossless / Faux FLAC / Transcode |
 | `ui/` | interface PySide6 |
 
@@ -45,12 +49,24 @@ Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titr
 Jamais par nom de fichier. Une piste Spotify est téléchargée par `/download?url=` ; si le bot ne la trouve pas,
 repli sur `/search` en prenant la durée la plus proche.
 
+## Analyse qualité locale
+
+Les fichiers ajoutés à la main (glisser-déposer sur la fenêtre, ou **Scanner un dossier…**) sont copiés dans RAW
+(l'original n'est jamais modifié ; un fichier déjà dans RAW est référencé sur place) puis analysés.
+`quality/analysis.py` reprend les seuils et la logique de whatsmybitrate v0.4 (© Oren Cohen, MIT) :
+coupure par trou spectral à −90/−75 dB, recherche de falaise, analyse par tranches de 15 s pour le lossless.
+Décodage par ffmpeg et STFT en numpy, sans librosa ni scipy.
+
+Validation contre la CLI d'origine (`tools/compare_whatsmybitrate.py`) sur 20 fichiers — FLAC/WAV/AIFF réels,
+MP3 128/192/256/320/V0, AAC, Vorbis, faux FLAC issus de MP3 128 et 192, MP3 128 réencodé en 320 :
+**20/20 identiques**, fréquences de coupure comprises.
+
 ## Feuille de route
 
 1. ~~MVP : lien Deezer → téléchargement dans RAW avec dédoublonnage → liste avec badge qualité~~
 2. ~~Spotify (API Spotify → `/download?url=`, repli `/search` par durée la plus proche)~~
-3. Ajout manuel (glisser-déposer, scan) + analyse qualité locale portée de
-   [whatsmybitrate](https://github.com/oren-cohen/whatsmybitrate) (MIT), validée contre la CLI d'origine
+3. ~~Ajout manuel (glisser-déposer, scan) + analyse qualité locale portée de
+   [whatsmybitrate](https://github.com/oren-cohen/whatsmybitrate) (MIT), validée contre la CLI d'origine~~
 4. Tags, playlists manuelles et intelligentes, filtres
 5. Remplacement d'un son par une meilleure version (même ID interne)
 6. Export rekordbox.xml (+ option FLAC → AIFF)

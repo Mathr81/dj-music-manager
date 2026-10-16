@@ -160,6 +160,10 @@ class Library:
                 db.execute("INSERT OR IGNORE INTO external_ids VALUES(?, ?, ?)", (provider, str(external_id), track_id))
         return track_id, created
 
+    def track_by_path(self, path: str) -> int | None:
+        row = self._one("SELECT id FROM tracks WHERE path = ?", path)
+        return row[0] if row else None
+
     def track(self, track_id: int) -> sqlite3.Row | None:
         return self._one("SELECT * FROM tracks WHERE id = ?", track_id)
 

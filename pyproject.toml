@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.27",
     "mutagen>=1.47",
     "keyring>=25",
+    "numpy>=2",
 ]
 
 [project.gui-scripts]

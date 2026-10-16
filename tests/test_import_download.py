@@ -85,7 +85,8 @@ def test_import_dedups_and_reimport_only_fetches_missing(env):
         "Daft Punk", "Discovery", "GBDUW0000053", 122.7, "flac")
     assert (t["badge"], t["real_quality"], t["max_frequency"], t["quality_origin"]) == (
         "Lossless", "Lossless", 21000, "api")
-    assert [f.name for f in raw.iterdir()] == ["Daft Punk - One More Time.flac"]  # doublon supprimé
+    # doublon supprimé ; selon le premier arrivé des deux téléchargements parallèles, le nom peut finir en « (2) »
+    assert [f.name for f in raw.iterdir()] == [t["path"]]
     assert lib.track_by_external("deezer", "1") == lib.track_by_external("deezer", "2") == t["id"]
 
     [failed] = lib.failed_jobs()

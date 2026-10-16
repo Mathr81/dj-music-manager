@@ -44,11 +44,15 @@ class SettingsDialog(QDialog):
         raw_row.addWidget(self.raw)
         raw_row.addWidget(browse)
         self.quality = _quality_combo(lib.get_setting("default_quality", config.DEFAULT_QUALITY))
+        self.api_url = QLineEdit(lib.get_setting("api_url", ""), placeholderText="https://…")
         self.key = QLineEdit(echoMode=QLineEdit.Password)
         self.key.setPlaceholderText("inchangée" if config.get_api_key() else "obligatoire")
+        self.ffmpeg = QLineEdit(lib.get_setting("ffmpeg_dir", ""),
+                                placeholderText="vide = ffmpeg/ffprobe trouvés dans le PATH")
         form = QFormLayout(self)
         form.addRow("Dossier RAW", raw_row)
         form.addRow("Qualité par défaut", self.quality)
+        form.addRow("URL de l'API", self.api_url)
         form.addRow("Clé API", self.key)
         form.addRow(QLabel("La clé est stockée dans le Gestionnaire d'identifiants Windows."))
         self.spotify_id = QLineEdit(lib.get_setting("spotify_client_id", ""))
@@ -64,6 +68,7 @@ class SettingsDialog(QDialog):
             f"(Web API) avec l'URI de redirection <code>{spotify.REDIRECT_URI}</code>.<br>"
             "Le compte propriétaire de l'app doit être Premium.", openExternalLinks=True)
         form.addRow(help_label)
+        form.addRow("Dossier ffmpeg", self.ffmpeg)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -104,12 +109,22 @@ class SettingsDialog(QDialog):
         if not raw or not Path(raw).is_dir():
             QMessageBox.warning(self, "Réglages", "Choisis un dossier RAW existant.")
             return
+        api_url = self.api_url.text().strip().rstrip("/")
+        if not api_url.startswith(("https://", "http://")):
+            QMessageBox.warning(self, "Réglages", "L'URL de l'API doit commencer par https://")
+            return
+        ffmpeg_dir = self.ffmpeg.text().strip()
+        if ffmpeg_dir and not (Path(ffmpeg_dir) / "ffprobe.exe").is_file():
+            QMessageBox.warning(self, "Réglages", "Ce dossier ne contient pas ffmpeg.exe et ffprobe.exe.")
+            return
         if not self.key.text().strip() and not config.get_api_key():
             QMessageBox.warning(self, "Réglages", "La clé API est obligatoire.")
             return
         self.lib.set_setting("raw_dir", str(Path(raw)))
         self.lib.set_setting("default_quality", self.quality.currentText())
         self.lib.set_setting("spotify_client_id", self.spotify_id.text().strip())
+        self.lib.set_setting("api_url", api_url)
+        self.lib.set_setting("ffmpeg_dir", ffmpeg_dir)
         if self.key.text().strip():
             config.set_api_key(self.key.text().strip())
         super().accept()

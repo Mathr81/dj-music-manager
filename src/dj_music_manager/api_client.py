@@ -1,6 +1,5 @@
 """Client de l'API Music DL (référence : docs/API.md)."""
 
-import itertools
 import os
 import re
 from dataclasses import dataclass
@@ -9,7 +8,8 @@ from urllib.parse import unquote
 
 import httpx
 
-BASE_URL = "https://music-dl-api.sublimavps.duckdns.org"
+from .files import reserve
+
 QUALITIES = ("flac", "mp3_320", "mp3_128")
 
 
@@ -58,21 +58,8 @@ def filename(content_disposition: str) -> str:
     return name
 
 
-def _reserve(dest_dir: Path, name: str):
-    """Réserve un nom libre en créant le .part en exclusif : jamais d'écrasement, même en parallèle."""
-    stem, ext = os.path.splitext(name)
-    for n in itertools.count(1):
-        final = dest_dir / (name if n == 1 else f"{stem} ({n}){ext}")
-        if final.exists():
-            continue
-        try:
-            return final, open(final.with_name(final.name + ".part"), "xb")
-        except FileExistsError:
-            continue
-
-
 class ApiClient:
-    def __init__(self, api_key: str, base_url: str = BASE_URL, transport: httpx.BaseTransport | None = None):
+    def __init__(self, api_key: str, base_url: str, transport: httpx.BaseTransport | None = None):
         self._http = httpx.Client(
             base_url=base_url, headers={"X-API-Key": api_key}, timeout=150, transport=transport
         )
@@ -109,7 +96,7 @@ class ApiClient:
             if r.status_code != 200:
                 r.read()
                 raise ApiError(r.status_code, error_message(r))
-            final, f = _reserve(dest_dir, filename(r.headers.get("content-disposition", "")))
+            final, f = reserve(dest_dir, filename(r.headers.get("content-disposition", "")))
             part = Path(f.name)
             total = int(r.headers.get("content-length") or 0)
             done = 0

@@ -1,12 +1,15 @@
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLineEdit, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLineEdit, QMainWindow, QMessageBox,
                                QProgressBar, QPushButton, QTableView, QTableWidget, QTableWidgetItem, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from .. import config, importer
+from .. import config, importer, manual
 from ..api_client import ApiClient
 from ..deezer import DeezerPublic
 from ..downloader import Downloader
@@ -28,6 +31,9 @@ class Bridge(QObject):
     preview_progress = Signal(int, int)
     preview_done = Signal(object)
     preview_failed = Signal(str)
+    manual_progress = Signal(int, int)
+    track_added = Signal(int)
+    manual_done = Signal(int, int, object)  # ajoutés, déjà présents, erreurs
 
 
 def _item(text, sort=None) -> QStandardItem:
@@ -54,6 +60,11 @@ class MainWindow(QMainWindow):
             lambda i, n: self.statusBar().showMessage(f"Analyse : {i}/{n} pistes…"))
         self.bridge.preview_done.connect(self._on_preview)
         self.bridge.preview_failed.connect(self._on_preview_failed)
+        self.bridge.manual_progress.connect(
+            lambda i, n: self.statusBar().showMessage(f"Ajout et analyse : {i}/{n} fichiers…"))
+        self.bridge.track_added.connect(self._show_track)
+        self.bridge.manual_done.connect(self._on_manual_done)
+        self.setAcceptDrops(True)
 
         self.link = QLineEdit(placeholderText="Lien d'album ou de playlist Deezer ou Spotify")
         self.link.returnPressed.connect(self._analyze)
@@ -61,6 +72,7 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(self.link)
         top.addWidget(self.analyze_btn)
+        top.addWidget(QPushButton("Scanner un dossier…", clicked=self._scan_folder))
         top.addWidget(QPushButton("Réglages", clicked=self._open_settings))
 
         self.tabs = QTabWidget()
@@ -127,6 +139,10 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         return w
 
+    def _show_track(self, track_id: int):
+        if track_id not in self._track_ids:
+            self._add_track_row(self.lib.track(track_id))
+
     def _add_track_row(self, t):
         self._track_ids.add(t["id"])
         duration = _item(fmt_duration(t["duration"]), t["duration"] or 0)
@@ -146,17 +162,17 @@ class MainWindow(QMainWindow):
 
     # --- API et réglages
     def _ensure_api(self) -> bool:
-        if not (config.get_api_key() and self.lib.get_setting("raw_dir")):
+        if not (config.get_api_key() and self.lib.get_setting("raw_dir") and self.lib.get_setting("api_url")):
             if not SettingsDialog(self.lib, self).exec():
                 return False
         if self.api is None:
-            self.api = ApiClient(config.get_api_key())
+            self.api = ApiClient(config.get_api_key(), self.lib.get_setting("api_url"))
             self.downloader = Downloader(self.api, self.lib, self.bridge.job_event.emit)
         return True
 
     def _open_settings(self):
         if SettingsDialog(self.lib, self).exec() and self.downloader:
-            self.api = ApiClient(config.get_api_key())  # la clé a pu changer
+            self.api = ApiClient(config.get_api_key(), self.lib.get_setting("api_url"))  # clé ou URL ont pu changer
             self.downloader.api = self.api
 
     def _spotify_client(self) -> Spotify | None:
@@ -202,6 +218,61 @@ class MainWindow(QMainWindow):
         if job_ids:
             self.tabs.setCurrentWidget(self.queue)
 
+    # --- ajout manuel (glisser-déposer ou scan)
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self._add_paths([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()])
+
+    def _scan_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Dossier à scanner")
+        if folder:
+            self._add_paths([folder])
+
+    def _add_paths(self, paths: list[str]):
+        if not self.lib.get_setting("raw_dir") and not SettingsDialog(self.lib, self).exec():
+            return
+        try:
+            ffmpeg, ffprobe = config.ffmpeg_tools(self.lib.get_setting("ffmpeg_dir"))
+        except FileNotFoundError as e:
+            QMessageBox.warning(self, "Ajout", str(e))
+            return
+        files = manual.collect(paths)
+        if not files:
+            QMessageBox.information(self, "Ajout", "Aucun fichier audio trouvé.")
+            return
+        raw = Path(self.lib.get_setting("raw_dir"))
+
+        def work():
+            added = known = 0
+            errors = []
+            # l'analyse spectrale est gourmande en CPU et en mémoire (~250 Mo par fichier en cours)
+            with ThreadPoolExecutor(min(4, max(1, (os.cpu_count() or 2) // 2))) as pool:
+                futures = {pool.submit(manual.add_file, self.lib, f, raw, ffmpeg, ffprobe): f for f in files}
+                for i, future in enumerate(as_completed(futures), 1):
+                    try:
+                        created, track_id = future.result()
+                        if created:
+                            added += 1
+                            self.bridge.track_added.emit(track_id)
+                        else:
+                            known += 1
+                    except Exception as e:
+                        errors.append(f"{futures[future].name} : {e}")
+                    self.bridge.manual_progress.emit(i, len(files))
+            self.bridge.manual_done.emit(added, known, errors)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_manual_done(self, added: int, known: int, errors: list[str]):
+        self.statusBar().clearMessage()
+        text = f"{added} ajouté(s), {known} déjà dans la bibliothèque, {len(errors)} erreur(s)."
+        if errors:
+            text += "\n\n" + "\n".join(errors[:20])
+        QMessageBox.information(self, "Ajout terminé", text)
+
     # --- file d'attente et échecs
     def _queue_row(self, job) -> int:
         row = self._job_rows.get(job["id"])
@@ -229,8 +300,7 @@ class MainWindow(QMainWindow):
             bar.setValue(0)
         elif job["status"] == "done":
             bar.setValue(100)
-            if job["track_id"] not in self._track_ids:
-                self._add_track_row(self.lib.track(job["track_id"]))
+            self._show_track(job["track_id"])
         if job["status"] in ("queued", "failed"):
             self._reload_failures()
 

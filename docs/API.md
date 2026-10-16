@@ -8,7 +8,7 @@ Tout ce qui est écrit ici reflète le comportement réel du code (`app/main.py`
 API HTTP qui télécharge des pistes musicales (FLAC ou MP3) via des bots Telegram.
 Elle renvoie un fichier audio tagué, nommé `Artiste - Titre.ext`, avec sa qualité **mesurée** dans les en-têtes.
 
-- **Base URL** : `https://music-dl-api.sublimavps.duckdns.org` (ci-dessous `$BASE`).
+- **Base URL** : celle de ton serveur, à saisir dans les Réglages de l'app (ci-dessous `$BASE`).
 - **Format** : JSON pour tout, sauf `/download` qui renvoie le binaire audio.
 - **Spécification OpenAPI** : `$BASE/openapi.json` ; doc interactive : `$BASE/docs`.
 
