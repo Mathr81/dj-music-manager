@@ -1,11 +1,12 @@
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
                                QPushButton, QVBoxLayout)
 
-from .. import config
+from .. import config, spotify
 from ..api_client import QUALITIES, ApiClient
 from ..importer import Preview, parse_duration
 from ..library import Library
@@ -26,10 +27,16 @@ def _quality_combo(current: str) -> QComboBox:
     return combo
 
 
+class _AuthBridge(QObject):
+    done = Signal(str, str)  # refresh token, erreur
+
+
 class SettingsDialog(QDialog):
     def __init__(self, lib: Library, parent=None):
         super().__init__(parent)
         self.lib = lib
+        self._auth = _AuthBridge(self)
+        self._auth.done.connect(self._on_spotify_auth)
         self.setWindowTitle("Réglages")
         self.raw = QLineEdit(lib.get_setting("raw_dir", ""))
         browse = QPushButton("Parcourir…", clicked=self._browse)
@@ -44,6 +51,19 @@ class SettingsDialog(QDialog):
         form.addRow("Qualité par défaut", self.quality)
         form.addRow("Clé API", self.key)
         form.addRow(QLabel("La clé est stockée dans le Gestionnaire d'identifiants Windows."))
+        self.spotify_id = QLineEdit(lib.get_setting("spotify_client_id", ""))
+        self.connect_btn = QPushButton("Connecter Spotify", clicked=self._connect_spotify)
+        self.spotify_status = QLabel("Connecté" if config.get_spotify_token() else "Non connecté")
+        spotify_row = QHBoxLayout()
+        spotify_row.addWidget(self.connect_btn)
+        spotify_row.addWidget(self.spotify_status, 1)
+        form.addRow("Spotify Client ID", self.spotify_id)
+        form.addRow("", spotify_row)
+        help_label = QLabel(
+            "Crée une app sur <a href='https://developer.spotify.com/dashboard'>developer.spotify.com</a> "
+            f"(Web API) avec l'URI de redirection <code>{spotify.REDIRECT_URI}</code>.<br>"
+            "Le compte propriétaire de l'app doit être Premium.", openExternalLinks=True)
+        form.addRow(help_label)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -53,6 +73,31 @@ class SettingsDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, "Dossier RAW", self.raw.text())
         if d:
             self.raw.setText(d)
+
+    def _connect_spotify(self):
+        client_id = self.spotify_id.text().strip()
+        if not client_id:
+            QMessageBox.warning(self, "Spotify", "Renseigne d'abord le Client ID de ton app Spotify.")
+            return
+        self.connect_btn.setEnabled(False)
+        self.spotify_status.setText("En attente de la connexion dans le navigateur…")
+
+        def work():
+            try:
+                self._auth.done.emit(spotify.authorize(client_id), "")
+            except Exception as e:
+                self._auth.done.emit("", str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_spotify_auth(self, token: str, error: str):
+        self.connect_btn.setEnabled(True)
+        if error:
+            self.spotify_status.setText(f"Échec : {error}")
+            return
+        config.set_spotify_token(token)
+        self.lib.set_setting("spotify_client_id", self.spotify_id.text().strip())
+        self.spotify_status.setText("Connecté")
 
     def accept(self):
         raw = self.raw.text().strip()
@@ -64,6 +109,7 @@ class SettingsDialog(QDialog):
             return
         self.lib.set_setting("raw_dir", str(Path(raw)))
         self.lib.set_setting("default_quality", self.quality.currentText())
+        self.lib.set_setting("spotify_client_id", self.spotify_id.text().strip())
         if self.key.text().strip():
             config.set_api_key(self.key.text().strip())
         super().accept()

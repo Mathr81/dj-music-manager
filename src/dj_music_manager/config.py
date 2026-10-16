@@ -21,3 +21,11 @@ def get_api_key() -> str | None:
 
 def set_api_key(key: str):
     keyring.set_password(SERVICE, "api_key", key)
+
+
+def get_spotify_token() -> str | None:
+    return keyring.get_password(SERVICE, "spotify_refresh_token")
+
+
+def set_spotify_token(token: str):
+    keyring.set_password(SERVICE, "spotify_refresh_token", token)

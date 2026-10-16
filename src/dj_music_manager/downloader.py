@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .api_client import ApiClient, ApiError
+from .importer import parse_duration
 from .library import Library
 from .quality.badge import badge
 from .tags import read_tags
@@ -73,7 +74,7 @@ class Downloader:
                 last = pct
                 self.on_event("progress", job["id"], pct)
 
-        dl = self.api.download(raw, job["quality"], id=job["download_id"] or job["external_id"], on_progress=progress)
+        dl, deezer_id = self._fetch(job, raw, progress)
         try:
             info = read_tags(dl.path)
             quality = job["quality"]
@@ -84,7 +85,7 @@ class Downloader:
                 "path": dl.path.relative_to(raw).as_posix(),
                 "expected_duration": job["expected_duration"],
                 "quality": quality,
-                "source": "deezer",
+                "source": job["provider"],
                 "real_quality": dl.real_quality,
                 "lossless": dl.lossless,
                 "max_frequency": dl.max_frequency,
@@ -94,8 +95,31 @@ class Downloader:
         except BaseException:
             dl.path.unlink(missing_ok=True)  # fichier illisible : pas d'orphelin dans RAW
             raise
-        if job["download_id"]:
-            self.lib.add_external("deezer", job["download_id"], track_id)
+        if deezer_id:
+            self.lib.add_external("deezer", deezer_id, track_id)
         if not created:
             dl.path.unlink()  # doublon (même ISRC, ou même piste téléchargée en parallèle) : notre propre fichier
         return track_id
+
+    def _fetch(self, job, raw: Path, progress):
+        """Renvoie (téléchargement, ID Deezer s'il est connu)."""
+        deezer_id = job["download_id"] or (job["external_id"] if job["provider"] == "deezer" else None)
+        if deezer_id:
+            return self.api.download(raw, job["quality"], id=deezer_id, on_progress=progress), deezer_id
+        try:
+            return self.api.download(raw, job["quality"], url=job["url"], on_progress=progress), None
+        except ApiError as e:
+            if e.status not in (404, 422):  # 422 : le bot n'a pas trouvé l'équivalent Deezer
+                raise
+            chosen = closest(self.api.search(f"{job['artist']} {job['title']}"), job["expected_duration"])
+            if chosen is None:
+                raise ApiError(e.status, f"{e.message} (et aucun résultat en recherche)") from e
+        self.lib.update_job(job["id"], download_id=chosen["id"])  # une relance ira droit au but
+        return self.api.download(raw, job["quality"], id=chosen["id"], on_progress=progress), chosen["id"]
+
+
+def closest(results: list[dict], duration: float | None) -> dict | None:
+    """Résultat de /search dont la durée est la plus proche de celle attendue."""
+    if not results or duration is None:
+        return results[0] if results else None
+    return min(results, key=lambda r: abs((parse_duration(r.get("duration")) or 0) - duration))

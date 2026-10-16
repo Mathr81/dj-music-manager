@@ -11,6 +11,7 @@ from ..api_client import ApiClient
 from ..deezer import DeezerPublic
 from ..downloader import Downloader
 from ..library import Library
+from ..spotify import Spotify, is_spotify_link
 from .dialogs import ImportDialog, SearchDialog, SettingsDialog, fmt_duration
 
 SORT_ROLE = Qt.UserRole + 1
@@ -43,6 +44,7 @@ class MainWindow(QMainWindow):
         self.api: ApiClient | None = None
         self.downloader: Downloader | None = None
         self.deezer = DeezerPublic()
+        self.spotify: Spotify | None = None
         self.setWindowTitle("DJ Music Manager")
         self.resize(1200, 750)
 
@@ -53,7 +55,7 @@ class MainWindow(QMainWindow):
         self.bridge.preview_done.connect(self._on_preview)
         self.bridge.preview_failed.connect(self._on_preview_failed)
 
-        self.link = QLineEdit(placeholderText="Lien d'album ou de playlist Deezer")
+        self.link = QLineEdit(placeholderText="Lien d'album ou de playlist Deezer ou Spotify")
         self.link.returnPressed.connect(self._analyze)
         self.analyze_btn = QPushButton("Analyser", clicked=self._analyze)
         top = QHBoxLayout()
@@ -157,17 +159,26 @@ class MainWindow(QMainWindow):
             self.api = ApiClient(config.get_api_key())  # la clé a pu changer
             self.downloader.api = self.api
 
+    def _spotify_client(self) -> Spotify | None:
+        client_id, token = self.lib.get_setting("spotify_client_id"), config.get_spotify_token()
+        if not (client_id and token):
+            return None
+        if self.spotify is None or (self.spotify.client_id, self.spotify.refresh_token) != (client_id, token):
+            self.spotify = Spotify(client_id, token, config.set_spotify_token)
+        return self.spotify
+
     # --- import
     def _analyze(self):
         url = self.link.text().strip()
         if not url or not self._ensure_api():
             return
         self.analyze_btn.setEnabled(False)
+        spotify = self._spotify_client() if is_spotify_link(url) else None
 
         def work():
             try:
-                self.bridge.preview_done.emit(
-                    importer.preview(self.api, self.deezer, self.lib, url, self.bridge.preview_progress.emit))
+                self.bridge.preview_done.emit(importer.preview(
+                    self.api, self.deezer, self.lib, url, self.bridge.preview_progress.emit, spotify))
             except Exception as e:
                 self.bridge.preview_failed.emit(str(e))
 
