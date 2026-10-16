@@ -1,0 +1,24 @@
+[project]
+name = "dj-music-manager"
+version = "0.1.0"
+description = "Gestion de bibliothèque musicale pour DJ (Windows)"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.8",
+    "httpx>=0.27",
+    "mutagen>=1.47",
+    "keyring>=25",
+]
+
+[project.gui-scripts]
+dj-music-manager = "dj_music_manager.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
