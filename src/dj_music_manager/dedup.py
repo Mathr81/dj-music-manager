@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
 DURATION_TOLERANCE = 3  # secondes
 
@@ -32,9 +33,11 @@ def norm_key(artist: str | None, title: str | None) -> str | None:
 
 
 def titles_match(expected: str | None, got: str | None) -> bool:
-    """Même morceau à la version près : « One More Time » ~ « One More Time (Radio Edit) », pas « Voyager »."""
+    """Même morceau à la version ou l'écriture près (« One More Time (Radio Edit) », « I´m Moving To The Sun »
+    pour « Movin' To The Sun »), mais pas « Veridis Quo » pour « Voyager »."""
     a, b = norm_text(_strip(expected or "")), norm_text(_strip(got or ""))
-    return not a or not b or a in b or b in a
+    # 0,6 : sur de vrais écarts du bot, les titres différents plafonnent à 0,40, les variantes partent de 0,70
+    return not a or not b or a in b or b in a or SequenceMatcher(None, a, b).ratio() >= 0.6
 
 
 def same_duration(a: float | None, b: float | None) -> bool:

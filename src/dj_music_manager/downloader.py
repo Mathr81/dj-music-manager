@@ -1,10 +1,11 @@
 """Exécution des jobs : 4 téléchargements simultanés max, une piste en échec n'arrête pas les autres."""
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .api_client import ApiClient, ApiError
+from .api_client import ApiClient, ApiError, log
 from .dedup import titles_match
 from .importer import match_collection, parse_duration
 from .library import Library
@@ -27,6 +28,24 @@ class Downloader:
         self.on_event = on_event or (lambda *a: None)
         self._pool = ThreadPoolExecutor(MAX_PARALLEL)
         self._stop = threading.Event()
+        self._paused = threading.Event()
+        self._cancelled: set[int] = set()
+
+    # --- pause et annulation
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def pause(self):
+        """Plus aucun nouveau téléchargement ne démarre ; ceux en cours se terminent."""
+        self._paused.set()
+
+    def resume(self):
+        self._paused.clear()
+
+    def cancel(self, job_ids: list[int]):
+        """Les jobs en attente ne partiront pas ; ceux en cours s'interrompent (fichier partiel supprimé)."""
+        self._cancelled.update(job_ids)
 
     def submit(self, job_ids: list[int]):
         jobs = [self.lib.job(j) for j in job_ids]
@@ -43,9 +62,13 @@ class Downloader:
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
 
     def _run(self, job_id: int):
-        if self._stop.is_set():
+        while self._paused.is_set() and not self._stop.is_set() and job_id not in self._cancelled:
+            time.sleep(0.3)
+        if self._stop.is_set() or job_id in self._cancelled:
             return
         job = self.lib.job(job_id)
+        if job is None or job["status"] != "queued":  # supprimé de la file entre-temps
+            return
         self.lib.start_job(job_id)
         self.on_event("status", job_id, None)
         try:
@@ -68,7 +91,7 @@ class Downloader:
 
         def progress(done, total):
             nonlocal last
-            if self._stop.is_set():
+            if self._stop.is_set() or job["id"] in self._cancelled:
                 raise Cancelled("téléchargement annulé")
             pct = done * 100 // total if total else 0
             if pct != last:
@@ -80,6 +103,8 @@ class Downloader:
             info = read_tags(dl.path)
             # le bot (surtout celui de secours) renvoie parfois un autre morceau : on ne le range pas en silence
             if not job["download_id"] and not titles_match(job["title"], info["title"]):
+                log.warning("%s | fichier inattendu (bot %s) | attendu « %s – %s » | reçu « %s – %s »", dl.source,
+                            dl.bot, job["artist"], job["title"], info["artist"], info["title"])
                 raise ApiError(0, f"le bot a renvoyé « {info['artist']} – {info['title']} » au lieu de "
                                   f"« {job['title']} » : utilise « Chercher à la main »")
             quality = job["quality"]
@@ -152,6 +177,10 @@ class Downloader:
             self.submit(job_ids)
             return
         matched, extras = match_collection(entries, p.tracks)
+        absent = [f"{t['artist']} – {t['title']}" for t in p.tracks if t["id"] not in matched]
+        if absent and len(entries) < len(p.tracks):
+            log.warning("/collection?url=%s | %d fichier(s) pour %d pistes attendues | absentes : %s",
+                        p.url, len(entries), len(p.tracks), "; ".join(absent[:30]))
         found = 0
         for job_id in job_ids:
             entry = matched.get(self.lib.job(job_id)["external_id"])

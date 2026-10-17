@@ -207,6 +207,34 @@ class Library:
             db.execute("INSERT INTO playlist_tracks VALUES(?, ?, ?) "
                        "ON CONFLICT DO UPDATE SET position = excluded.position", (playlist_id, track_id, position))
 
+    def merge_source_duplicates(self, canonical) -> int:
+        """Fusionne les playlists importées du même lien écrit autrement (ex. « ?si=… » de Spotify), et range
+        les liens sous leur forme canonique. Garde la plus ancienne ; contenu = dernier import, puis ce que seules
+        les anciennes avaient. Renvoie le nombre de playlists fusionnées."""
+        groups: dict[str, list[int]] = {}
+        for p in self._all("SELECT id, source_url FROM playlists WHERE source_url IS NOT NULL ORDER BY id"):
+            groups.setdefault(canonical(p["source_url"]), []).append(p["id"])
+        merged = 0
+        with self._tx() as db:
+            for url, ids in groups.items():
+                keep, others = ids[0], ids[1:]
+                if others:
+                    order: list[int] = []
+                    for pid in [ids[-1], *ids[:-1]]:
+                        for (track_id,) in db.execute("SELECT track_id FROM playlist_tracks WHERE playlist_id = ? "
+                                                      "ORDER BY position", (pid,)):
+                            if track_id not in order:
+                                order.append(track_id)
+                    marks = ", ".join("?" * len(ids))
+                    db.execute(f"DELETE FROM playlist_tracks WHERE playlist_id IN ({marks})", ids)
+                    db.executemany("INSERT INTO playlist_tracks VALUES(?, ?, ?)",
+                                   [(keep, t, i) for i, t in enumerate(order)])
+                    db.execute(f"UPDATE jobs SET playlist_id = ? WHERE playlist_id IN ({marks})", (keep, *ids))
+                    db.execute(f"DELETE FROM playlists WHERE id IN ({', '.join('?' * len(others))})", others)
+                    merged += len(others)
+                db.execute("UPDATE playlists SET source_url = ? WHERE id = ?", (url, keep))
+        return merged
+
     def playlists(self) -> list[sqlite3.Row]:
         return self._all("SELECT * FROM playlists ORDER BY name COLLATE NOCASE")
 
@@ -309,6 +337,10 @@ class Library:
 
     def failed_jobs(self) -> list[sqlite3.Row]:
         return self._all("SELECT * FROM jobs WHERE status = 'failed' ORDER BY id")
+
+    def delete_jobs(self, job_ids: list[int]):
+        with self._tx() as db:
+            db.executemany("DELETE FROM jobs WHERE id = ?", [(j,) for j in job_ids])
 
     def drop_failed_jobs(self, playlist_id: int):
         """Un nouvel import de la même playlist remplace ses anciens échecs."""

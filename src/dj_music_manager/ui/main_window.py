@@ -66,8 +66,8 @@ class MainWindow(QMainWindow):
         self.panel = LibraryPanel(lib)
         self.bridge.track_added.connect(self.panel.show_track)
         self.tabs.addTab(self.panel, "Bibliothèque")
-        self.queue = self._table(("Piste", "Qualité", "Statut", "Progression"))
-        self.tabs.addTab(self.queue, "File d'attente")
+        self.queue_tab = self._queue_tab()
+        self.tabs.addTab(self.queue_tab, "File d'attente")
         self.tabs.addTab(self._failures_tab(), "Échecs")
 
         central = QWidget()
@@ -90,13 +90,30 @@ class MainWindow(QMainWindow):
         t.verticalHeader().hide()
         return t
 
+    def _queue_tab(self) -> QWidget:
+        self.queue = self._table(("Piste", "Qualité", "Statut", "Progression"))
+        self.pause_btn = QPushButton("Mettre en pause", clicked=self._toggle_pause)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.pause_btn)
+        buttons.addWidget(QPushButton("Supprimer la sélection", clicked=self._remove_queued))
+        buttons.addWidget(QPushButton("Vider la file", clicked=self._clear_queue))
+        buttons.addStretch()
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.addWidget(self.queue)
+        layout.addLayout(buttons)
+        return w
+
     def _failures_tab(self) -> QWidget:
         self.failures = self._table(("Piste", "Code", "Message"))
         self.failures.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         buttons = QHBoxLayout()
         buttons.addWidget(QPushButton("Relancer la sélection", clicked=self._retry_selected))
         buttons.addWidget(QPushButton("Chercher à la main…", clicked=self._search_selected))
+        buttons.addWidget(QPushButton("Supprimer la sélection", clicked=self._remove_failures))
+        buttons.addWidget(QPushButton("Tout effacer", clicked=self._clear_failures))
         buttons.addStretch()
+        buttons.addWidget(QPushButton("Journal des erreurs API", clicked=self._open_api_log))
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.addWidget(self.failures)
@@ -165,7 +182,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"« {p.title} » : {len(job_ids)} pistes en file, {len(p.existing)} déjà là", 8000)
         if job_ids or p.total:  # aperçu tronqué : le bot peut encore apporter des titres
             self.downloader.submit_collection(p, quality, job_ids)
-            self.tabs.setCurrentWidget(self.queue)
+            self.tabs.setCurrentWidget(self.queue_tab)
 
     def _paste_full(self, base: importer.Preview):
         """Liste complète d'une playlist Spotify tronquée, depuis les liens copiés dans l'app Spotify."""
@@ -247,7 +264,9 @@ class MainWindow(QMainWindow):
         if row is None:
             row = self._job_rows[job["id"]] = self.queue.rowCount()
             self.queue.insertRow(row)
-            self.queue.setItem(row, 0, QTableWidgetItem(f"{job['artist']} – {job['title']}"))
+            name = QTableWidgetItem(f"{job['artist']} – {job['title']}")
+            name.setData(Qt.UserRole, job["id"])
+            self.queue.setItem(row, 0, name)
             self.queue.setItem(row, 1, QTableWidgetItem(job["quality"]))
             self.queue.setItem(row, 2, QTableWidgetItem())
             self.queue.setCellWidget(row, 3, QProgressBar(value=0))
@@ -291,6 +310,53 @@ class MainWindow(QMainWindow):
     def _selected_failures(self) -> list[int]:
         rows = sorted({i.row() for i in self.failures.selectedItems()})
         return [self.failures.item(r, 0).data(Qt.UserRole) for r in rows]
+
+    def _toggle_pause(self):
+        if not self.downloader:
+            return
+        if self.downloader.paused:
+            self.downloader.resume()
+        else:
+            self.downloader.pause()
+        self.pause_btn.setText("Reprendre" if self.downloader.paused else "Mettre en pause")
+        self.statusBar().showMessage("File en pause : les téléchargements en cours se terminent"
+                                     if self.downloader.paused else "File relancée", 5000)
+
+    def _drop_from_queue(self, rows: list[int]):
+        """Retire ces lignes de la file : jobs en attente ou en cours annulés et supprimés, terminés juste masqués."""
+        ids = [self.queue.item(r, 0).data(Qt.UserRole) for r in rows]
+        pending = [i for i in ids if (job := self.lib.job(i)) and job["status"] in ("queued", "running")]
+        if self.downloader:
+            self.downloader.cancel(pending)
+        self.lib.delete_jobs(pending)
+        for r in sorted(rows, reverse=True):
+            self.queue.removeRow(r)
+        self._job_rows = {self.queue.item(r, 0).data(Qt.UserRole): r for r in range(self.queue.rowCount())}
+
+    def _remove_queued(self):
+        self._drop_from_queue(sorted({i.row() for i in self.queue.selectedItems()}))
+
+    def _clear_queue(self):
+        if self.queue.rowCount() and QMessageBox.question(
+                self, "Vider la file", "Annuler tous les téléchargements en attente et en cours ?") == QMessageBox.Yes:
+            self._drop_from_queue(list(range(self.queue.rowCount())))
+
+    def _remove_failures(self):
+        self.lib.delete_jobs(self._selected_failures())
+        self._reload_failures()
+
+    def _clear_failures(self):
+        jobs = self.lib.failed_jobs()
+        if jobs and QMessageBox.question(self, "Échecs", f"Effacer les {len(jobs)} échecs ?") == QMessageBox.Yes:
+            self.lib.delete_jobs([j["id"] for j in jobs])
+            self._reload_failures()
+
+    def _open_api_log(self):
+        path = config.api_log_path()
+        if not path.exists():
+            QMessageBox.information(self, "Journal des erreurs API", "Aucune erreur de l'API enregistrée pour l'instant.")
+            return
+        os.startfile(path)  # éditeur de texte par défaut de Windows
 
     def _retry_selected(self):
         ids = self._selected_failures()

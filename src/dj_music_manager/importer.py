@@ -6,11 +6,11 @@ from dataclasses import dataclass, field
 import httpx
 
 from .api_client import ApiClient
-from .deezer import DeezerPublic
+from .deezer import COLLECTION_RE, DeezerPublic
 from .dedup import norm_key, same_duration
 from .library import Library
-from .spotify import (NotOwnedError, Spotify, SpotifyError, is_spotify_link, public_collection, public_track,
-                      track_ids_in)
+from .spotify import (LINK_RE, NotOwnedError, Spotify, SpotifyError, is_spotify_link, public_collection,
+                      public_track, track_ids_in)
 
 PASTE_HINT = ("Dans l'app Spotify : ouvre la playlist, Ctrl+A puis Ctrl+C, "
               "puis clique sur « Coller la liste complète ».")
@@ -24,6 +24,15 @@ def parse_duration(s: str | None) -> int | None:
     for part in s.split(":"):
         secs = secs * 60 + int(part)
     return secs
+
+
+def canonical_source(url: str) -> str:
+    """Même album/playlist quel que soit le lien partagé (« ?si=… » de Spotify, /intl-fr/, /fr/…)."""
+    if m := LINK_RE.search(url):
+        return f"https://open.spotify.com/{m[1]}/{m[2]}"
+    if m := COLLECTION_RE.search(url):
+        return f"https://www.deezer.com/{m[1]}/{m[2]}"
+    return url.strip()
 
 
 def find_existing(lib: Library, provider: str, t: dict, isrc_lookup) -> int | None:
@@ -134,6 +143,7 @@ def preview_pasted(base: Preview, text: str, lib: Library, spotify: Spotify | No
 
 def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_progress=None,
             spotify: Spotify | None = None) -> Preview:
+    url = canonical_source(url)  # sinon chaque lien de partage créerait une nouvelle playlist
     if is_spotify_link(url):
         p = _spotify_preview(url, spotify)
         isrc_lookup = (lambda track_id: (spotify.track(track_id).get("external_ids") or {}).get("isrc")) \

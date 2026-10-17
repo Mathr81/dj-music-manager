@@ -1,7 +1,9 @@
 """Emplacement des données et clé API (Gestionnaire d'identifiants Windows, jamais dans le code ni la base)."""
 
+import logging
 import os
 import shutil
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import keyring
@@ -42,3 +44,18 @@ def ffmpeg_tools(ffmpeg_dir: str | None) -> tuple[str, str]:
     if not all(t and Path(t).is_file() for t in tools):
         raise FileNotFoundError("ffmpeg/ffprobe introuvables : indique leur dossier dans les Réglages")
     return tools
+
+
+def api_log_path() -> Path:
+    return data_dir() / "api_errors.log"
+
+
+def setup_api_log() -> Path:
+    """Journal des erreurs de l'API (2 Mo, 3 archives) : une ligne par incident, pour corriger l'API."""
+    path = api_log_path()
+    handler = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger = logging.getLogger("dj_music_manager.api")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    return path

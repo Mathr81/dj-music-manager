@@ -68,6 +68,17 @@ piste : `/download?id=` (Deezer) ou `/download?url=` (Spotify), puis repli `/sea
 Si `/collection` échoue, tout passe piste par piste. Après chaque téléchargement, le titre du fichier reçu est
 comparé au titre attendu : un autre morceau renvoyé par le bot va dans **Échecs** au lieu d'être rangé en silence.
 
+## File d'attente, échecs et journal de l'API
+
+- **File d'attente** : *Mettre en pause* (rien de nouveau ne démarre, les téléchargements en cours se terminent),
+  *Supprimer la sélection*, *Vider la file* (annule l'attente et l'en-cours, fichiers partiels supprimés).
+- **Échecs** : *Relancer*, *Chercher à la main…*, *Supprimer la sélection*, *Tout effacer*.
+- **Journal des erreurs API** (`%APPDATA%\dj-music-manager\api_errors.log`, 2 Mo × 4) : une ligne par incident
+  — requête exacte (sans la clé), code HTTP ou erreur réseau, durée, message de l'API ; collections incomplètes
+  (titres absents) ; fichiers dont le contenu n'est pas le morceau demandé (bot et requête source).
+- Un même album/playlist reste une seule playlist, quel que soit le lien partagé (« ?si=… » de Spotify,
+  `/intl-fr/`, `/fr/`…) ; les doublons créés avant ce correctif sont fusionnés au démarrage.
+
 ## Analyse qualité locale
 
 Les fichiers ajoutés à la main (glisser-déposer sur la fenêtre, ou **Scanner un dossier…**) sont copiés dans RAW
