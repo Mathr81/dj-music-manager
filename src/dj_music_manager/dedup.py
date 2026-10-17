@@ -31,5 +31,11 @@ def norm_key(artist: str | None, title: str | None) -> str | None:
     return f"{norm_text(main_artist)}|{norm_text(_strip(title))}"
 
 
+def titles_match(expected: str | None, got: str | None) -> bool:
+    """Même morceau à la version près : « One More Time » ~ « One More Time (Radio Edit) », pas « Voyager »."""
+    a, b = norm_text(_strip(expected or "")), norm_text(_strip(got or ""))
+    return not a or not b or a in b or b in a
+
+
 def same_duration(a: float | None, b: float | None) -> bool:
     return a is not None and b is not None and abs(a - b) <= DURATION_TOLERANCE

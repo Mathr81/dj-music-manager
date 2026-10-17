@@ -21,10 +21,11 @@ La base est dans `%APPDATA%\dj-music-manager\library.db`.
 Un lien de playlist ou d'album Spotify s'importe **sans connexion** : l'app lit la page d'intégration publique
 (lecteur « embed »), qui liste titre, artistes et durée des **100 premiers titres**.
 
-**Playlist de plus de 100 titres** : dans l'app Spotify, ouvre la playlist, **Ctrl+A puis Ctrl+C** (copie les
-liens de tous les titres), puis clique sur **Coller la liste complète** dans l'aperçu. L'app garde les titres déjà
-lus et récupère les autres un par un (pages publiques des morceaux, ~1 min 20 pour 200 titres ; quelques secondes
-si Spotify est connecté). La playlist garde son lien et son nom.
+**Playlist de plus de 100 titres** : rien à faire, au téléchargement le bot récupère la playlist entière
+(`/collection`) et les titres au-delà des 100 sont ajoutés s'ils ne sont pas déjà dans la bibliothèque (artiste,
+titre et durée). Pour voir la liste complète **avant** de télécharger : dans l'app Spotify, ouvre la playlist,
+**Ctrl+A puis Ctrl+C**, puis clique sur **Coller la liste complète** dans l'aperçu (pages publiques des morceaux,
+~1 min 20 pour 200 titres ; quelques secondes si Spotify est connecté).
 
 Connexion facultative (titres plus rapides avec ISRC, playlists privées) :
 
@@ -58,8 +59,14 @@ Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin 
 | `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags) |
 
 Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titre normalisés ± 3 s.
-Jamais par nom de fichier. Une piste Spotify est téléchargée par `/download?url=` ; si le bot ne la trouve pas,
-repli sur `/search` en prenant la durée la plus proche.
+Jamais par nom de fichier.
+
+Téléchargement d'un album ou d'une playlist : **un seul appel `/collection`** au bot pour tout le lien, chaque piste
+attendue est rapprochée d'un fichier (artiste + titre normalisés, durée ± 3 s) puis récupérée par `/file`.
+Ce que le bot ne fournit pas (il omet en silence ce qu'il ne trouve pas, surtout le bot de secours) passe piste par
+piste : `/download?id=` (Deezer) ou `/download?url=` (Spotify), puis repli `/search` sur la durée la plus proche.
+Si `/collection` échoue, tout passe piste par piste. Après chaque téléchargement, le titre du fichier reçu est
+comparé au titre attendu : un autre morceau renvoyé par le bot va dans **Échecs** au lieu d'être rangé en silence.
 
 ## Analyse qualité locale
 

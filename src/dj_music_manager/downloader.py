@@ -5,7 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .api_client import ApiClient, ApiError
-from .importer import parse_duration
+from .dedup import titles_match
+from .importer import match_collection, parse_duration
 from .library import Library
 from .quality.badge import badge
 from .tags import read_tags
@@ -20,7 +21,7 @@ class Cancelled(Exception):
 class Downloader:
     def __init__(self, api: ApiClient, lib: Library, on_event=None):
         """on_event(kind, job_id, payload) est appelé depuis les threads de travail.
-        kind : 'status' (payload None) ou 'progress' (payload = pourcentage)."""
+        kind : 'status' (payload None), 'progress' (payload = pourcentage) ou 'collection' (job_id 0, message)."""
         self.api = api
         self.lib = lib
         self.on_event = on_event or (lambda *a: None)
@@ -77,6 +78,10 @@ class Downloader:
         dl, deezer_id = self._fetch(job, raw, progress)
         try:
             info = read_tags(dl.path)
+            # le bot (surtout celui de secours) renvoie parfois un autre morceau : on ne le range pas en silence
+            if not job["download_id"] and not titles_match(job["title"], info["title"]):
+                raise ApiError(0, f"le bot a renvoyé « {info['artist']} – {info['title']} » au lieu de "
+                                  f"« {job['title']} » : utilise « Chercher à la main »")
             quality = job["quality"]
             if quality == "flac" and info["format"] == "mp3":
                 quality = "mp3_320"  # le bot de secours ne fournit que du MP3 320
@@ -103,19 +108,76 @@ class Downloader:
 
     def _fetch(self, job, raw: Path, progress):
         """Renvoie (téléchargement, ID Deezer s'il est connu)."""
+        if job["file"]:  # déjà préparé par le bot via /collection
+            try:
+                return self.api.file(raw, job["file"], on_progress=progress), job["download_id"]
+            except ApiError as e:
+                if e.status != 404:  # 404 : message disparu côté Telegram, on repasse piste par piste
+                    raise
         deezer_id = job["download_id"] or (job["external_id"] if job["provider"] == "deezer" else None)
         if deezer_id:
             return self.api.download(raw, job["quality"], id=deezer_id, on_progress=progress), deezer_id
-        try:
-            return self.api.download(raw, job["quality"], url=job["url"], on_progress=progress), None
-        except ApiError as e:
-            if e.status not in (404, 422):  # 422 : le bot n'a pas trouvé l'équivalent Deezer
-                raise
-            chosen = closest(self.api.search(f"{job['artist']} {job['title']}"), job["expected_duration"])
-            if chosen is None:
-                raise ApiError(e.status, f"{e.message} (et aucun résultat en recherche)") from e
+        error = None
+        if job["url"]:
+            try:
+                return self.api.download(raw, job["quality"], url=job["url"], on_progress=progress), None
+            except ApiError as e:
+                if e.status not in (404, 422):  # 422 : le bot n'a pas trouvé l'équivalent Deezer
+                    raise
+                error = e
+        chosen = closest(self.api.search(f"{job['artist']} {job['title']}"), job["expected_duration"])
+        if chosen is None:
+            message = "aucun résultat en recherche"
+            raise ApiError(error.status, f"{error.message} ({message})") if error else ApiError(404, message)
         self.lib.update_job(job["id"], download_id=chosen["id"])  # une relance ira droit au but
         return self.api.download(raw, job["quality"], id=chosen["id"], on_progress=progress), chosen["id"]
+
+    # --- album/playlist entier en un appel au bot
+    def submit_collection(self, p, quality: str, job_ids: list[int]) -> threading.Thread:
+        """/collection une seule fois pour tout le lien, puis /file pour chaque piste trouvée ; ce que le bot
+        ne fournit pas passe piste par piste. Si l'aperçu était tronqué (p.total), les fichiers en plus sont
+        les titres manquants : ajoutés s'ils ne sont pas déjà dans la bibliothèque."""
+        for j in job_ids:
+            self.on_event("status", j, None)  # visibles « En attente » pendant que le bot prépare
+        thread = threading.Thread(target=self._collect, args=(p, quality, job_ids), daemon=True)
+        thread.start()
+        return thread
+
+    def _collect(self, p, quality: str, job_ids: list[int]):
+        self.on_event("collection", 0, "Le bot prépare l'album ou la playlist entière (jusqu'à quelques minutes)…")
+        try:
+            entries = self.api.collection(p.url, quality)
+        except Exception as e:
+            self.on_event("collection", 0, f"Collection indisponible ({e}) : téléchargement piste par piste.")
+            self.submit(job_ids)
+            return
+        matched, extras = match_collection(entries, p.tracks)
+        found = 0
+        for job_id in job_ids:
+            entry = matched.get(self.lib.job(job_id)["external_id"])
+            if entry is not None:
+                self.lib.update_job(job_id, file=entry["file"])
+                found += 1
+        new_ids = []
+        if p.total:
+            playlist_id = self.lib.playlist_for_source(p.url, p.title)
+            for position, e in enumerate(extras, len(p.tracks)):
+                duration = parse_duration(e.get("duration"))
+                track_id = self.lib.find_track(None, e.get("artist"), e.get("title"), duration)
+                if track_id is not None:
+                    self.lib.link(playlist_id, track_id, position)
+                else:
+                    new_ids += self.lib.add_jobs([{
+                        "playlist_id": playlist_id, "position": position, "provider": p.provider,
+                        "file": e["file"], "artist": e.get("artist"), "title": e.get("title"),
+                        "expected_duration": duration, "quality": quality}])
+        message = f"Bot : {found} fichier(s) prêt(s)"
+        if new_ids:
+            message += f", {len(new_ids)} titre(s) en plus de l'aperçu"
+        if found < len(job_ids):
+            message += f" ; {len(job_ids) - found} piste(s) cherchée(s) une par une"
+        self.on_event("collection", 0, message)
+        self.submit(job_ids + new_ids)
 
 
 def closest(results: list[dict], duration: float | None) -> dict | None:

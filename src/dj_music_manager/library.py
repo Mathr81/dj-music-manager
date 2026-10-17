@@ -68,11 +68,13 @@ MIGRATIONS = [
 
     CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);
     """,
+    # v2 : fichier déjà préparé par le bot (/collection), à récupérer par /file
+    "ALTER TABLE jobs ADD COLUMN file TEXT;",
 ]
 
 TRACK_FIELDS = ("path", "isrc", "artist", "title", "album", "duration", "expected_duration", "bpm", "format",
                 "quality", "source", "real_quality", "lossless", "max_frequency", "badge", "quality_origin")
-JOB_FIELDS = ("playlist_id", "position", "provider", "external_id", "url", "artist", "title",
+JOB_FIELDS = ("playlist_id", "position", "provider", "external_id", "url", "file", "artist", "title",
               "expected_duration", "quality")
 
 

@@ -9,7 +9,7 @@ API HTTP qui télécharge des pistes musicales (FLAC ou MP3) via des bots Telegr
 Elle renvoie un fichier audio tagué, nommé `Artiste - Titre.ext`, avec sa qualité **mesurée** dans les en-têtes.
 
 - **Base URL** : celle de ton serveur, à saisir dans les Réglages de l'app (ci-dessous `$BASE`).
-- **Format** : JSON pour tout, sauf `/download` qui renvoie le binaire audio.
+- **Format** : JSON pour tout, sauf `/download` et `/file` qui renvoient le binaire audio.
 - **Spécification OpenAPI** : `$BASE/openapi.json` ; doc interactive : `$BASE/docs`.
 
 ## Authentification
@@ -68,6 +68,38 @@ pas de limite de débit côté API). Même format que `/search`, dans l'ordre de
 - Album/playlist inexistant ou privé → `404`. Deezer injoignable → `502`.
 
 Ensuite, télécharger chaque piste avec `/download?id=` (voir la recette « Télécharger un album »).
+
+### `GET /collection?url=<lien album ou playlist>`
+
+Envoie le lien **entier** au bot, qui renvoie toutes les pistes d'un coup : bien plus rapide que piste par piste,
+et c'est la seule voie pour une **playlist Spotify**. Réponse JSON ; les fichiers ne sont pas encore
+téléchargés : récupérer chacun avec `GET <file>` (voir `/file`).
+
+| Paramètre | Type | Contraintes |
+|---|---|---|
+| `url` | string | ≤ 500 car., `http(s)://`. Testé : playlist et album Spotify, album et playlist Deezer |
+| `quality` | `flac` \| `mp3_320` \| `mp3_128` | optionnel, comme `/download` (bot principal seulement) |
+
+```json
+{
+  "bot": "DeezerMusicBot",
+  "tracks": [
+    {"file": "/file/DeezerMusicBot/4625", "artist": "Daft Punk", "title": "Lose Yourself to Dance",
+     "duration": "5:53", "size": 14213781, "mime": "audio/mpeg"}
+  ]
+}
+```
+
+- Ordre de l'album/playlist. Le bot principal retire les doublons, pas le bot de secours.
+- Une piste introuvable chez le bot est simplement absente : comparer avec la liste attendue si besoin.
+- Durée : 10 à 35 s pour 45 pistes. Pendant ce temps, les autres requêtes vers le même bot attendent.
+- Erreurs : comme `/download` (`422` refus du bot, `504` bot muet).
+
+### `GET /file/{bot}/{id}`
+
+Télécharge un fichier listé par `/collection`, en prenant directement le chemin `file`. Réponse identique à
+`/download` (binaire, nom `Artiste - Titre.ext`, mêmes en-têtes `X-…`, même cache). Inconnu → `404`.
+Le chemin reste valable tant que le message existe dans la conversation Telegram avec le bot.
 
 ### `GET /download`
 
@@ -149,9 +181,9 @@ Toujours du JSON avec un champ `detail`.
 
 | Code | Quand | `detail` |
 |---|---|---|
-| `400` | paramètres de `/download` incorrects | chaîne |
+| `400` | paramètres de `/download` incorrects ; lien d'album/playlist passé à `/download` (→ `/collection`) | chaîne |
 | `401` | clé API absente ou fausse | chaîne |
-| `404` | `/download?q=` sans résultat ; source de qualité inconnue ; album/playlist introuvable | chaîne |
+| `404` | `/download?q=` sans résultat ; source de qualité inconnue ; album/playlist introuvable ; `/file` inconnu | chaîne |
 | `422` | le bot refuse (piste introuvable, réservée Premium/donation, option de qualité invalide) | **chaîne** : message du bot, ex. `"Track not found or unavailable.\nDebugID: 123"` |
 | `422` | validation FastAPI (paramètre trop long, `id` non numérique, `value` non entier…) | **tableau** d'objets `{loc, msg, type}` |
 | `502` | `/tracks` : API Deezer injoignable | chaîne |
@@ -174,6 +206,7 @@ Ne pas réessayer automatiquement un `422` du bot (même réponse garantie) ; un
 | changement de qualité (`quality=` différent du réglage en cours) | + ~3 s |
 | `/download` en échec (bot principal + bot de secours) | jusqu'à ~25 s |
 | pire cas avant `504` | ~110 s |
+| `/collection`, 45 pistes | 10 à 35 s (puis `/file` : ~90 s pour 450 Mo, 4 en parallèle) |
 
 → Régler le timeout HTTP du client à **au moins 150 s**, et streamer le corps vers un fichier plutôt que de le garder en mémoire.
 
@@ -184,6 +217,15 @@ Ne pas réessayer automatiquement un `422` du bot (même réponse garantie) ; un
   eux, tournent en parallèle.
 - Ne pas dépasser ~4 téléchargements simultanés : le débit Telegram est plafonné à ~6 Mo/s pour tout le compte,
   au-delà ça ne va pas plus vite.
+
+**Bot principal en panne**
+
+Le bot principal peut se bloquer plusieurs minutes, par exemple après une rafale de fichiers, ou sur un
+téléchargement qui ne finit pas. Il répond alors « Please wait for the current download… » ou plus rien du tout.
+La première requête qui le constate attend son timeout (~25 à 90 s) et passe au bot de secours. Le bot principal
+est ensuite mis de côté 2 min (puis 4, 8… jusqu'à 30 min s'il reste muet) : les requêtes vont directement au
+secours (`X-Bot: DeezerMusicBot`, MP3 320 seulement, `quality` ignoré). `/search` bascule alors sur l'API Deezer
+(mêmes résultats). Aucune action à faire côté client.
 
 **Qualité : utiliser `quality` sur `/download`, pas `PUT /quality`**
 
@@ -201,7 +243,8 @@ côté client pour la vitesse ; relancer `/download` est bon marché.
 **Ce qui marche avec le compte actuel (gratuit)**
 
 - Recherche : Deezer uniquement.
-- Téléchargement : IDs et liens Deezer ; liens Spotify (convertis en Deezer par le bot, pas toujours trouvés).
+- Téléchargement : IDs et liens Deezer ; liens Spotify (convertis en Deezer par le bot, pas toujours trouvés) ;
+  albums et playlists Deezer/Spotify via `/collection`.
 - Tidal, Apple Music, Qobuz… : `422` (réservé Premium/donation).
 - Le bot de secours ne fournit que du MP3 320 : un `X-Bot: DeezerMusicBot` signifie pas de FLAC pour cette piste.
 
@@ -285,6 +328,30 @@ with ThreadPoolExecutor(4) as pool:
 
 Préfixer les noms par un numéro si l'ordre compte : `f"{i:02d} - {name}"` avec `enumerate(tracks, 1)`.
 Compter ~1 min pour un album FLAC de 12 titres hors cache (débit Telegram plafonné).
+
+**Télécharger une playlist Spotify** (un seul appel au bot, puis 4 fichiers en parallèle)
+
+```python
+coll = client.get("/collection", params={"url": "https://open.spotify.com/playlist/2jTy5QwqWJ1ZUv2XeJPYbn",
+                                         "quality": "mp3_320"}).json()
+
+
+def save_file(track: dict) -> str:
+    with client.stream("GET", track["file"]) as r:
+        if r.status_code != 200:
+            r.read()
+            return f"ÉCHEC {track['artist']} - {track['title']} : {r.json()['detail']}"
+        name = filename(r)
+        with open(name, "wb") as f:
+            for chunk in r.iter_bytes():
+                f.write(chunk)
+        return f"{name} [{r.headers['x-real-quality']}]"
+
+
+with ThreadPoolExecutor(4) as pool:
+    for line in pool.map(save_file, coll["tracks"]):
+        print(line)
+```
 
 **Télécharger en MP3 320**
 

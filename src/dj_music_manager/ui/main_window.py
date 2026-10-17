@@ -158,12 +158,13 @@ class MainWindow(QMainWindow):
             return
         if not result:
             return
-        job_ids = importer.queue(self.lib, p, dlg.quality.currentText())
+        quality = dlg.quality.currentText()
+        job_ids = importer.queue(self.lib, p, quality)
         self.panel.refresh_playlists()
-        self.downloader.submit(job_ids)
         self.link.clear()
         self.statusBar().showMessage(f"« {p.title} » : {len(job_ids)} pistes en file, {len(p.existing)} déjà là", 8000)
-        if job_ids:
+        if job_ids or p.total:  # aperçu tronqué : le bot peut encore apporter des titres
+            self.downloader.submit_collection(p, quality, job_ids)
             self.tabs.setCurrentWidget(self.queue)
 
     def _paste_full(self, base: importer.Preview):
@@ -253,6 +254,9 @@ class MainWindow(QMainWindow):
         return row
 
     def _on_job_event(self, kind: str, job_id: int, payload):
+        if kind == "collection":
+            self.statusBar().showMessage(payload)
+            return
         job = self.lib.job(job_id)
         if job is None:
             return

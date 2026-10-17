@@ -156,7 +156,10 @@ class ImportDialog(QDialog):
         row.addWidget(self.quality)
         layout.addLayout(row)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText(f"Télécharger {plural(n_new, 'piste')}" if n_new else "Mettre à jour la playlist")
+        label = f"Télécharger {plural(n_new, 'piste')}" if n_new else "Mettre à jour la playlist"
+        if preview.total:
+            label += f" + les {preview.total - len(preview.tracks)} autres"
+        buttons.button(QDialogButtonBox.Ok).setText(label)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

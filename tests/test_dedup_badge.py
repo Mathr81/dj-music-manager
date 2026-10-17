@@ -1,6 +1,6 @@
 import pytest
 
-from dj_music_manager.dedup import norm_key
+from dj_music_manager.dedup import norm_key, titles_match
 from dj_music_manager.quality.badge import badge
 
 
@@ -31,3 +31,16 @@ def test_norm_key(artist, title, expected):
 ])
 def test_badge(real, lossless, fmt, expected):
     assert badge(real, lossless, fmt) == expected
+
+
+@pytest.mark.parametrize("expected, got, same", [
+    ("One More Time", "One More Time", True),
+    ("One More Time", "One More Time (Radio Edit)", True),
+    ("Fille à Papa", "Fille a papa", True),
+    ("Delilah (pull me out of this)", "Delilah", True),
+    ("Song feat. X", "Song", True),
+    ("Voyager", "Veridis Quo", False),
+    ("Un", None, True),  # fichier sans titre : rien à comparer
+])
+def test_titles_match(expected, got, same):
+    assert titles_match(expected, got) is same

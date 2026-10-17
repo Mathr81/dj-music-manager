@@ -7,6 +7,7 @@ import httpx
 
 from .api_client import ApiClient
 from .deezer import DeezerPublic
+from .dedup import norm_key, same_duration
 from .library import Library
 from .spotify import (NotOwnedError, Spotify, SpotifyError, is_spotify_link, public_collection, public_track,
                       track_ids_in)
@@ -70,7 +71,10 @@ def _spotify_preview(url: str, spotify: Spotify | None) -> Preview:
     if total and total > len(tracks):
         p.total = total
         p.warning = (f"Spotify ne rend publics que les {len(tracks)} premiers titres de cette playlist "
-                     f"(sur {total}). {PASTE_HINT}")
+                     f"(sur {total}). Au téléchargement, le bot récupère la playlist entière : les "
+                     f"{total - len(tracks)} autres seront ajoutés s'ils ne sont pas déjà dans la bibliothèque "
+                     "(vérifié par artiste, titre et durée). Pour les voir avant : " + PASTE_HINT[0].lower()
+                     + PASTE_HINT[1:])
     return p
 
 
@@ -143,6 +147,27 @@ def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_pro
         p = Preview(url, title, tracks)
         isrc_lookup = lambda track_id: deezer.track(track_id).get("isrc")
     return _dedup(p, lib, isrc_lookup, on_progress)
+
+
+def match_collection(entries: list[dict], tracks: list[dict]) -> tuple[dict[str, dict], list[dict]]:
+    """Rapproche les fichiers de /collection des pistes attendues : artiste + titre normalisés et durée ± 3 s,
+    puis titre seul (artistes écrits autrement). Renvoie ({ID de piste: fichier}, fichiers sans piste attendue)."""
+    def title_key(key: str | None) -> str | None:
+        return key.split("|", 1)[1] if key else None
+
+    remaining = list(entries)
+    matched: dict[str, dict] = {}
+    for key_of in (lambda a, t: norm_key(a, t), lambda a, t: title_key(norm_key(a or "?", t))):
+        for t in tracks:
+            if t["id"] in matched:
+                continue
+            key = key_of(t["artist"], t["title"])
+            e = next((e for e in remaining if key and key_of(e.get("artist"), e.get("title")) == key
+                      and same_duration(parse_duration(e.get("duration")), t["duration"])), None)
+            if e is not None:
+                remaining.remove(e)
+                matched[t["id"]] = e
+    return matched, remaining
 
 
 def queue(lib: Library, p: Preview, quality: str) -> list[int]:
