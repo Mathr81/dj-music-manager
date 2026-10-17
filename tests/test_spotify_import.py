@@ -11,7 +11,7 @@ from dj_music_manager.api_client import ApiClient
 from dj_music_manager.deezer import DeezerPublic
 from dj_music_manager.downloader import Downloader, closest
 from dj_music_manager.library import Library
-from dj_music_manager.spotify import NOT_OWNED, NotOwnedError
+from dj_music_manager.spotify import NOT_OWNED, NotOwnedError, SpotifyError
 
 URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
 SP_TRACKS = [
@@ -120,5 +120,59 @@ def test_public_playlist_fallback(tmp_path, monkeypatch, spotify, total, warned)
     assert (p.provider, p.title, len(p.tracks)) == ("spotify", "ÉTÉ 2K26", 3)
     assert set(p.existing) == {"sp1"}  # reconnue par artiste + titre ± 3 s
     assert (p.warning is not None) is warned
-    if warned:
-        assert "294 autres" in p.warning
+    assert p.total == (297 if warned else None)  # active le bouton « Coller la liste complète »
+
+
+def sid(name: str) -> str:
+    return f"{name:0>22}"  # les ID Spotify font 22 caractères
+
+
+def link(track_id: str) -> str:
+    return f"https://open.spotify.com/track/{track_id}"
+
+
+def test_pasted_full_list_completes_truncated_playlist(tmp_path):
+    lib = Library(tmp_path / "db")
+    known = [{"id": sid("sp1"), "artist": "A", "title": "Un", "duration": 200.0, "url": link(sid("sp1")), "isrc": None},
+             {"id": sid("sp2"), "artist": "B", "title": "Deux", "duration": 210.0, "url": link(sid("sp2")), "isrc": None}]
+    base = importer.Preview(URL, "ÉTÉ 2K26", known, "spotify", total=5)
+    fetched = []
+
+    def fetch_public(track_id):
+        fetched.append(track_id)
+        if track_id == sid("gone"):
+            raise SpotifyError("track Spotify introuvable")
+        return {"id": track_id, "artist": "C", "title": track_id, "duration": 180.0, "url": link(track_id), "isrc": None}
+
+    text = "\n".join(link(i) for i in (sid("sp1"), sid("sp2"), sid("sp3"), sid("gone"), sid("sp4")))
+    p = importer.preview_pasted(base, text, lib, fetch_public=fetch_public)
+
+    assert (p.url, p.title, p.provider) == (URL, "ÉTÉ 2K26", "spotify")  # même playlist qu'à l'analyse
+    assert [t["id"] for t in p.tracks] == [sid(i) for i in ("sp1", "sp2", "sp3", "sp4")]  # ordre de Spotify
+    assert sorted(fetched) == sorted(sid(i) for i in ("gone", "sp3", "sp4"))  # les titres déjà connus ne sont pas redemandés
+    assert "1 titre(s) introuvable(s)" in p.warning and p.total is None
+
+
+def test_pasted_list_uses_official_api_when_logged_in(tmp_path):
+    class LoggedIn(FakeSpotify):
+        def track_info(self, track_id):
+            return {"id": track_id, "artist": "Daft Punk", "title": "One More Time", "duration": 320.0,
+                    "url": link(track_id), "isrc": "GBDUW0000053"}
+
+    lib = Library(tmp_path / "db")
+    existing, _ = lib.add_track({"path": "a.mp3", "artist": "X", "title": "Y", "isrc": "GBDUW0000053",
+                                 "duration": 320.0, "source": "deezer"})
+    p = importer.preview_pasted(importer.Preview(URL, "Set", [], "spotify", total=1), link(sid("sp9")), lib, LoggedIn(),
+                                fetch_public=lambda t: pytest.fail("page publique inutile une fois connecté"))
+    assert p.existing == {sid("sp9"): existing}  # reconnu par l'ISRC de l'API officielle
+
+
+@pytest.mark.parametrize("text, message", [
+    ("rien à voir", "aucun lien de titre"),
+    (link(sid("autre")), "ne correspondent pas"),
+])
+def test_pasted_list_errors(tmp_path, text, message):
+    base = importer.Preview(URL, "Set", [{"id": sid("sp1"), "artist": "A", "title": "Un", "duration": 1.0,
+                                          "url": link(sid("sp1")), "isrc": None}], "spotify", total=5)
+    with pytest.raises(SpotifyError, match=message):
+        importer.preview_pasted(base, text, Library(tmp_path / "db"))

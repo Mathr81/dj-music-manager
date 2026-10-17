@@ -19,19 +19,23 @@ La base est dans `%APPDATA%\dj-music-manager\library.db`.
 ### Spotify
 
 Un lien de playlist ou d'album Spotify s'importe **sans connexion** : l'app lit la page d'intégration publique
-(lecteur « embed »), qui liste titre, artistes et durée des **100 premiers titres**. Au-delà, l'aperçu indique
-combien de titres manquent.
+(lecteur « embed »), qui liste titre, artistes et durée des **100 premiers titres**.
 
-Connexion facultative, pour tes playlists privées ou de plus de 100 titres :
+**Playlist de plus de 100 titres** : dans l'app Spotify, ouvre la playlist, **Ctrl+A puis Ctrl+C** (copie les
+liens de tous les titres), puis clique sur **Coller la liste complète** dans l'aperçu. L'app garde les titres déjà
+lus et récupère les autres un par un (pages publiques des morceaux, ~1 min 20 pour 200 titres ; quelques secondes
+si Spotify est connecté). La playlist garde son lien et son nom.
+
+Connexion facultative (titres plus rapides avec ISRC, playlists privées) :
 
 1. Crée une app sur [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) (Web API),
    avec l'URI de redirection `http://127.0.0.1:8888/callback`. Ton compte doit être Premium.
 2. Dans **Réglages**, colle son Client ID puis **Connecter Spotify** (connexion PKCE dans le navigateur ;
    le refresh token va dans le Gestionnaire d'identifiants Windows).
 
-Depuis février 2026, l'API officielle ne livre que les playlists **que tu possèdes ou co-édites**. Pour importer
-en entier la playlist de quelqu'un d'autre, copie ses titres dans une playlist à toi (Ctrl+A, « Ajouter à la
-playlist »). Les téléchargements, eux, passent toujours par `/download?url=` et n'ont pas besoin de Spotify.
+Depuis février 2026, l'API officielle d'une app en mode développeur ne livre le contenu que des playlists **que tu
+possèdes ou co-édites**, même connectée : c'est ce qui rend la copie depuis l'app nécessaire pour les autres.
+Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin de Spotify.
 
 ## Modules
 

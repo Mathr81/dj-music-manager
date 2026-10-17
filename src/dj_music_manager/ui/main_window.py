@@ -4,16 +4,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLineEdit, QMainWindow, QMessageBox,
-                               QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLineEdit,
+                               QMainWindow, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from .. import config, importer, manual
 from ..api_client import ApiClient
 from ..deezer import DeezerPublic
 from ..downloader import Downloader
 from ..library import Library
-from ..spotify import Spotify, is_spotify_link
+from ..spotify import Spotify, is_spotify_link, track_ids_in
 from .dialogs import ImportDialog, SearchDialog, SettingsDialog
 from .library_panel import LibraryPanel
 
@@ -152,7 +152,11 @@ class MainWindow(QMainWindow):
         self.analyze_btn.setEnabled(True)
         self.statusBar().clearMessage()
         dlg = ImportDialog(p, self.lib.get_setting("default_quality", config.DEFAULT_QUALITY), self)
-        if not dlg.exec():
+        result = dlg.exec()
+        if result == ImportDialog.PASTE:
+            self._paste_full(p)
+            return
+        if not result:
             return
         job_ids = importer.queue(self.lib, p, dlg.quality.currentText())
         self.panel.refresh_playlists()
@@ -161,6 +165,25 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"« {p.title} » : {len(job_ids)} pistes en file, {len(p.existing)} déjà là", 8000)
         if job_ids:
             self.tabs.setCurrentWidget(self.queue)
+
+    def _paste_full(self, base: importer.Preview):
+        """Liste complète d'une playlist Spotify tronquée, depuis les liens copiés dans l'app Spotify."""
+        text = QApplication.clipboard().text()
+        if not track_ids_in(text):
+            QMessageBox.information(self, "Liste complète", importer.PASTE_HINT)
+            self._on_preview(base)  # on revient à l'aperçu pour recliquer une fois la copie faite
+            return
+        self.analyze_btn.setEnabled(False)
+        spotify = self._spotify_client()
+
+        def work():
+            try:
+                self.bridge.preview_done.emit(importer.preview_pasted(
+                    base, text, self.lib, spotify, self.bridge.preview_progress.emit))
+            except Exception as e:
+                self.bridge.preview_failed.emit(str(e))
+
+        threading.Thread(target=work, daemon=True).start()
 
     # --- ajout manuel (glisser-déposer ou scan)
     def dragEnterEvent(self, event):

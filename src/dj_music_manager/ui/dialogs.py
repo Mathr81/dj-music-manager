@@ -133,6 +133,8 @@ class SettingsDialog(QDialog):
 
 
 class ImportDialog(QDialog):
+    PASTE = 2  # code de retour : coller la liste complète copiée dans l'app Spotify
+
     def __init__(self, preview: Preview, quality: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Import")
@@ -145,6 +147,9 @@ class ImportDialog(QDialog):
             warning = QLabel(f"⚠ {preview.warning}", wordWrap=True, maximumWidth=480)
             warning.setStyleSheet("color: #ef6c00")
             layout.addWidget(warning)
+        if preview.total:  # liste tronquée : la copie depuis l'app Spotify donne tous les titres
+            layout.addWidget(QPushButton(f"Coller la liste complète ({preview.total} titres)…",
+                                         clicked=lambda: self.done(self.PASTE)))
         self.quality = _quality_combo(quality)
         row = QHBoxLayout()
         row.addWidget(QLabel("Qualité"))

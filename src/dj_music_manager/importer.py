@@ -1,11 +1,18 @@
 """Import d'un album/playlist Deezer ou Spotify : aperçu dédoublonné, puis création des jobs de téléchargement."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+
+import httpx
 
 from .api_client import ApiClient
 from .deezer import DeezerPublic
 from .library import Library
-from .spotify import NotOwnedError, Spotify, is_spotify_link, public_collection
+from .spotify import (NotOwnedError, Spotify, SpotifyError, is_spotify_link, public_collection, public_track,
+                      track_ids_in)
+
+PASTE_HINT = ("Dans l'app Spotify : ouvre la playlist, Ctrl+A puis Ctrl+C, "
+              "puis clique sur « Coller la liste complète ».")
 
 
 def parse_duration(s: str | None) -> int | None:
@@ -43,6 +50,7 @@ class Preview:
     provider: str = "deezer"
     existing: dict[str, int] = field(default_factory=dict)  # ID source -> ID interne
     warning: str | None = None  # ex. playlist Spotify publique tronquée à 100 titres
+    total: int | None = None  # vrai nombre de titres quand la liste est tronquée
 
     @property
     def new(self) -> list[dict]:
@@ -60,10 +68,64 @@ def _spotify_preview(url: str, spotify: Spotify | None) -> Preview:
     title, tracks, total = public_collection(url)
     p = Preview(url, title, tracks, "spotify")
     if total and total > len(tracks):
+        p.total = total
         p.warning = (f"Spotify ne rend publics que les {len(tracks)} premiers titres de cette playlist "
-                     f"(sur {total}). Pour importer les {total - len(tracks)} autres, copie-les dans une playlist "
-                     "à toi (Ctrl+A, « Ajouter à la playlist ») et connecte Spotify dans les Réglages.")
+                     f"(sur {total}). {PASTE_HINT}")
     return p
+
+
+def _isrc_lookup(spotify: Spotify | None):
+    if spotify is None:
+        return lambda track_id: None  # sans connexion : artiste + titre ± 3 s, puis ISRC des tags au téléchargement
+    return lambda track_id: (spotify.track(track_id).get("external_ids") or {}).get("isrc")
+
+
+def _dedup(p: Preview, lib: Library, isrc_lookup, on_progress) -> Preview:
+    for i, t in enumerate(p.tracks, 1):
+        track_id = find_existing(lib, p.provider, t, isrc_lookup)
+        if track_id is not None:
+            p.existing[t["id"]] = track_id
+        if on_progress:
+            on_progress(i, len(p.tracks))
+    return p
+
+
+def preview_pasted(base: Preview, text: str, lib: Library, spotify: Spotify | None = None,
+                   on_progress=None, fetch_public=public_track) -> Preview:
+    """Liste complète d'une playlist Spotify à partir des liens copiés dans l'app (Ctrl+A, Ctrl+C).
+    Garde le lien et le nom de la playlist analysée ; ne récupère que les titres inconnus de l'aperçu."""
+    ids = track_ids_in(text)
+    if not ids:
+        raise SpotifyError(f"Le presse-papiers ne contient aucun lien de titre Spotify. {PASTE_HINT}")
+    known = {t["id"]: t for t in base.tracks}
+    if known and not known.keys() & set(ids):
+        raise SpotifyError("Les titres copiés ne correspondent pas à cette playlist : as-tu copié la bonne ?")
+    fetch = spotify.track_info if spotify else fetch_public
+    missing = [i for i in ids if i not in known]
+
+    def get(track_id):
+        try:
+            return fetch(track_id)
+        except (SpotifyError, httpx.HTTPError):
+            return None  # titre retiré de Spotify : on l'ignore plutôt que d'abandonner tout le collage
+
+    fetched = {}
+    # pages publiques : ~1 s chacune, 4 en parallèle restent raisonnables pour Spotify
+    with ThreadPoolExecutor(4) as pool:
+        for n, (track_id, t) in enumerate(zip(missing, pool.map(get, missing)), 1):
+            fetched[track_id] = t
+            if on_progress:
+                on_progress(n, len(missing))
+    tracks = [t for t in (known.get(i) or fetched[i] for i in ids) if t]
+    p = Preview(base.url, base.title, tracks, "spotify")
+    warnings = []
+    if len(tracks) < len(ids):
+        warnings.append(f"{len(ids) - len(tracks)} titre(s) introuvable(s) sur Spotify, ignoré(s).")
+    if base.total and len(ids) < base.total:
+        warnings.append(f"{len(ids)} titres collés sur {base.total} : tous les titres étaient-ils sélectionnés "
+                        "(Ctrl+A) dans Spotify ?")
+    p.warning = " ".join(warnings) or None
+    return _dedup(p, lib, _isrc_lookup(spotify), None)
 
 
 def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_progress=None,
@@ -80,13 +142,7 @@ def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_pro
             title = url
         p = Preview(url, title, tracks)
         isrc_lookup = lambda track_id: deezer.track(track_id).get("isrc")
-    for i, t in enumerate(p.tracks, 1):
-        track_id = find_existing(lib, p.provider, t, isrc_lookup)
-        if track_id is not None:
-            p.existing[t["id"]] = track_id
-        if on_progress:
-            on_progress(i, len(p.tracks))
-    return p
+    return _dedup(p, lib, isrc_lookup, on_progress)
 
 
 def queue(lib: Library, p: Preview, quality: str) -> list[int]:

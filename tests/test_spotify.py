@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from dj_music_manager.spotify import (NOT_OWNED, REDIRECT_URI, Spotify, SpotifyError, authorize, is_spotify_link,
-                                      public_collection)
+                                      public_collection, public_track, track_ids_in)
 
 PID = "37i9dQZF1DXcBWIGoYBM5M"
 
@@ -138,3 +138,22 @@ def test_public_playlist_truncated_at_100_reports_real_total():
 def test_public_playlist_errors_are_explicit(html, status, message):
     with pytest.raises(SpotifyError, match=message):
         public_collection(f"https://open.spotify.com/playlist/{PID}", transport=public_transport(html, status=status))
+
+
+def test_track_ids_in_pasted_text():
+    # Ctrl+C dans l'app Spotify : un lien par ligne ; on accepte aussi les URI et les liens localisés
+    text = ("https://open.spotify.com/track/2x7ItKbPQXhqXad1SwVnwS?si=abc\n"
+            "https://open.spotify.com/intl-fr/track/3po7XwLok35mirHxEqpASy\r\n"
+            "spotify:track:2x7ItKbPQXhqXad1SwVnwS\n"  # doublon
+            f"https://open.spotify.com/playlist/{PID}\n")  # pas un titre
+    assert track_ids_in(text) == ["2x7ItKbPQXhqXad1SwVnwS", "3po7XwLok35mirHxEqpASy"]
+
+
+def test_public_track():
+    data = {"props": {"pageProps": {"state": {"data": {"entity": {
+        "title": "Fille à Papa", "duration": 169586,
+        "artists": [{"name": "Vacra"}, {"name": "La Rvfleuze"}]}}}}}}
+    html = f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(data)}</script>'
+    t = public_track("2x7ItKbPQXhqXad1SwVnwS", transport=httpx.MockTransport(lambda r: httpx.Response(200, text=html)))
+    assert (t["artist"], t["title"], t["duration"], t["url"]) == (
+        "Vacra, La Rvfleuze", "Fille à Papa", 169.586, "https://open.spotify.com/track/2x7ItKbPQXhqXad1SwVnwS")

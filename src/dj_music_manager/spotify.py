@@ -25,6 +25,7 @@ REDIRECT_HOST, REDIRECT_PORT = "127.0.0.1", 8888
 REDIRECT_URI = f"http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"  # à déclarer dans le tableau de bord Spotify
 SCOPES = "playlist-read-private playlist-read-collaborative"
 LINK_RE = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]{2}/)?|spotify:)(playlist|album)[/:]([A-Za-z0-9]{22})")
+TRACK_LINK_RE = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]{2}/)?track/|spotify:track:)([A-Za-z0-9]{22})")
 NOT_OWNED = ("Spotify ne donne le contenu que des playlists que tu possèdes ou co-édites. "
              "Copie ses titres dans une playlist à toi (Ctrl+A, « Ajouter à la playlist ») puis réessaie.")
 EMBED_URL = "https://open.spotify.com/embed/{kind}/{id}"
@@ -45,39 +46,60 @@ def is_spotify_link(url: str) -> bool:
     return LINK_RE.search(url) is not None
 
 
+def track_ids_in(text: str) -> list[str]:
+    """ID des titres d'un texte collé depuis l'app Spotify (Ctrl+A puis Ctrl+C), dans l'ordre, sans doublon."""
+    return list(dict.fromkeys(TRACK_LINK_RE.findall(text)))
+
+
+def _track(track_id: str, artist: str, title: str, duration_s: float, isrc: str | None = None) -> dict:
+    return {"id": track_id, "artist": artist, "title": title, "duration": duration_s,
+            "url": f"https://open.spotify.com/track/{track_id}", "isrc": isrc}
+
+
+def _public_client(transport: httpx.BaseTransport | None) -> httpx.Client:
+    return httpx.Client(timeout=20, transport=transport, follow_redirects=True,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+
+
+def _embed_entity(http: httpx.Client, kind: str, sid: str) -> dict:
+    """Données de la page d'intégration publique (lecteur « embed »).
+    shortcut: dépend du format interne de cette page ; à adapter si Spotify le change."""
+    r = http.get(EMBED_URL.format(kind=kind, id=sid))
+    if r.status_code == 404:
+        raise SpotifyError(f"{kind} Spotify introuvable (privé ou supprimé ?)")
+    if r.status_code != 200:
+        raise SpotifyError(f"page Spotify inaccessible ({r.status_code})")
+    try:
+        return json.loads(_NEXT_DATA_RE.search(r.text)[1])["props"]["pageProps"]["state"]["data"]["entity"]
+    except (TypeError, KeyError, ValueError) as e:
+        raise SpotifyError("format de la page Spotify inattendu : l'import public est peut-être à mettre à jour") from e
+
+
+def public_track(track_id: str, transport: httpx.BaseTransport | None = None) -> dict:
+    """Titre, artistes et durée d'un morceau, sans connexion (les pages de morceaux ne sont pas restreintes)."""
+    with _public_client(transport) as http:
+        e = _embed_entity(http, "track", track_id)
+    try:
+        return _track(track_id, ", ".join(a["name"] for a in e.get("artists", [])), e["title"], e["duration"] / 1000)
+    except (TypeError, KeyError) as err:
+        raise SpotifyError("format de la page Spotify inattendu : l'import public est peut-être à mettre à jour") from err
+
+
 def public_collection(url: str, transport: httpx.BaseTransport | None = None) -> tuple[str, list[dict], int | None]:
-    """Sans connexion, par la page d'intégration publique : (nom, pistes, nombre total de titres si tronqué).
-    shortcut: dépend du format interne de la page embed ; à adapter si Spotify le change."""
+    """Sans connexion, par la page d'intégration publique : (nom, pistes, nombre total de titres si tronqué)."""
     m = LINK_RE.search(url)
     if not m:
         raise SpotifyError(f"lien Spotify non reconnu : {url}")
     kind, sid = m[1], m[2]
-    with httpx.Client(timeout=20, transport=transport, follow_redirects=True,
-                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}) as http:
-        r = http.get(EMBED_URL.format(kind=kind, id=sid))
-        if r.status_code == 404:
-            raise SpotifyError("playlist ou album Spotify introuvable (privé ou supprimé ?)")
-        if r.status_code != 200:
-            raise SpotifyError(f"page Spotify inaccessible ({r.status_code})")
+    with _public_client(transport) as http:
+        entity = _embed_entity(http, kind, sid)
         try:
-            entity = json.loads(_NEXT_DATA_RE.search(r.text)[1])["props"]["pageProps"]["state"]["data"]["entity"]
             name, items = entity["name"], entity.get("trackList", [])
-        except (TypeError, KeyError, ValueError) as e:
+            tracks = [_track(t["uri"].rsplit(":", 1)[1], t.get("subtitle", "").replace("\xa0", " "), t["title"],
+                             t["duration"] / 1000)
+                      for t in items if t.get("uri", "").startswith("spotify:track:")]  # pas les épisodes
+        except (TypeError, KeyError) as e:
             raise SpotifyError("format de la page Spotify inattendu : l'import public est peut-être à mettre à jour") from e
-        tracks = []
-        for t in items:
-            uri = t.get("uri", "")
-            if not uri.startswith("spotify:track:"):
-                continue  # épisodes de podcast
-            track_id = uri.rsplit(":", 1)[1]
-            tracks.append({
-                "id": track_id,
-                "artist": t.get("subtitle", "").replace("\xa0", " "),  # « Artiste 1, Artiste 2 »
-                "title": t["title"],
-                "duration": t["duration"] / 1000,
-                "url": f"https://open.spotify.com/track/{track_id}",
-                "isrc": None,
-            })
         total = None
         if len(tracks) >= EMBED_LIMIT:  # peut-être tronquée : le vrai total est sur la page publique
             page = http.get(PAGE_URL.format(kind=kind, id=sid))
@@ -175,6 +197,15 @@ class Spotify:
     def track(self, track_id: str) -> dict:
         return self._get(f"/tracks/{track_id}")
 
+    def track_info(self, track_id: str) -> dict:
+        """Même format que les pistes de collection(), ISRC compris."""
+        return self._to_track(self.track(track_id))
+
+    @staticmethod
+    def _to_track(t: dict) -> dict:
+        return _track(t["id"], ", ".join(a["name"] for a in t.get("artists", [])), t["name"], t["duration_ms"] / 1000,
+                      (t.get("external_ids") or {}).get("isrc"))
+
     def collection(self, url: str) -> tuple[str, list[dict]]:
         """(nom, pistes) ; chaque piste : id, artist, title, duration (s), url, isrc (si connu)."""
         m = LINK_RE.search(url)
@@ -197,13 +228,6 @@ class Spotify:
                 t = (entry.get("item") or entry.get("track")) if kind == "playlist" else entry
                 if not t or t.get("type") != "track" or t.get("is_local") or not t.get("id"):
                     continue  # épisodes de podcast, fichiers locaux
-                tracks.append({
-                    "id": t["id"],
-                    "artist": ", ".join(a["name"] for a in t.get("artists", [])),
-                    "title": t["name"],
-                    "duration": t["duration_ms"] / 1000,
-                    "url": f"https://open.spotify.com/track/{t['id']}",
-                    "isrc": (t.get("external_ids") or {}).get("isrc"),
-                })
+                tracks.append(self._to_track(t))
             page = self._get(page["next"]) if page.get("next") else None
         return meta["name"], tracks
