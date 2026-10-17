@@ -53,6 +53,7 @@ Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin 
 | `tags.py` | lecture des tags (jamais d'écriture) |
 | `smart.py` | règles des playlists intelligentes -> SQL paramétré |
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
+| `export.py` | export rekordbox.xml, crates Serato, M3U8, conversion FLAC → AIFF |
 | `quality/badge.py` | badge unique 128 / 192 / 256 / 320 / Lossless / Faux FLAC / Transcode |
 | `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags) |
 
@@ -90,6 +91,23 @@ analysé ; l'ancien part dans la corbeille Windows. Les métadonnées connues so
 complète que les champs vides. Avant de remplacer, l'app prévient si le fichier ressemble à un autre son de la
 bibliothèque ou si sa durée diffère de plus de 10 s.
 
+## Export vers les logiciels DJ
+
+Bouton **Exporter pour logiciel DJ…** sous les playlists (ou clic droit sur une playlist → *Exporter…*).
+Aucune base de données de logiciel DJ n'est jamais modifiée.
+
+| Logiciel | Format | Pour l'utiliser |
+|---|---|---|
+| rekordbox | `rekordbox.xml` (format « playlists sharing » de Pioneer) | Préférences > Avancé > Base de données > *rekordbox xml* : choisir le fichier ; les playlists apparaissent dans *rekordbox xml*, clic droit > Importer |
+| Serato DJ | crates `dj-music-manager%%<playlist>.crate` dans le `_Serato_` du disque des fichiers (`Musique\_Serato_` pour C:) | elles apparaissent sous *dj-music-manager* au démarrage ; les autres crates ne sont pas touchées |
+| VirtualDJ | `.m3u8` | copier dans `Documents\VirtualDJ\Playlists` ou glisser dans le navigateur |
+| Mixxx, Traktor, Engine DJ… | `.m3u8` (UTF-8) | Mixxx : Playlists > clic droit > Importer une playlist |
+
+Option **Convertir les FLAC en AIFF (anciens CDJ)** : conversion dans un dossier à part (`RAW_AIFF` par défaut,
+jamais dans RAW), 16 ou 24 bits selon la source, 48 kHz maximum, tags recopiés ; une conversion à jour est
+réutilisée. Les exports pointent alors vers les AIFF. Les tags perso sont exportés dans le champ *Comments*
+de rekordbox. Le rekordbox.xml produit est relu sans erreur par pyrekordbox.
+
 ## Feuille de route
 
 1. ~~MVP : lien Deezer → téléchargement dans RAW avec dédoublonnage → liste avec badge qualité~~
@@ -98,5 +116,5 @@ bibliothèque ou si sa durée diffère de plus de 10 s.
    [whatsmybitrate](https://github.com/oren-cohen/whatsmybitrate) (MIT), validée contre la CLI d'origine~~
 4. ~~Tags, playlists manuelles et intelligentes, filtres~~
 5. ~~Remplacement d'un son par une meilleure version (même ID interne)~~
-6. Export rekordbox.xml (+ option FLAC → AIFF)
+6. ~~Export rekordbox.xml (+ option FLAC → AIFF), Serato, VirtualDJ, Mixxx~~
 7. Paquet PyInstaller avec ffmpeg embarqué

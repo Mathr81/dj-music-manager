@@ -2,6 +2,7 @@
 
 import json
 import threading
+from importlib.metadata import version
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSortFilterProxyModel, Qt, Signal
@@ -10,10 +11,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxL
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
                                QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
 
-from .. import config, manual
+from .. import config, export, manual
 from ..library import Library
 from ..quality.badge import BADGES
 from .dialogs import fmt_duration
+from .export_dialog import HOW_TO, ExportDialog
 from .smart_dialog import SmartPlaylistDialog
 
 SORT_ROLE = Qt.UserRole + 1
@@ -79,6 +81,8 @@ class TrackFilter(QSortFilterProxyModel):
 
 class _Signals(QObject):
     replaced = Signal(int, str)  # ID du son, message d'erreur (vide si réussi)
+    export_progress = Signal(int, int)
+    exported = Signal(object, str)  # résultat de export.run, message d'erreur
 
 
 class LibraryPanel(QWidget):
@@ -87,6 +91,9 @@ class LibraryPanel(QWidget):
         self.lib = lib
         self._signals = _Signals(self)
         self._signals.replaced.connect(self._on_replaced)
+        self._signals.export_progress.connect(
+            lambda n, total: self.window().statusBar().showMessage(f"Conversion en AIFF : {n}/{total}…"))
+        self._signals.exported.connect(self._on_exported)
         self._rows: dict[int, int] = {}  # ID interne -> ligne du modèle source
         self._shown = -1  # playlist affichée (None = toute la bibliothèque)
 
@@ -103,6 +110,7 @@ class LibraryPanel(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self.playlists)
         left_layout.addLayout(new_buttons)
+        left_layout.addWidget(QPushButton("Exporter pour logiciel DJ…", clicked=lambda: self._export()))
 
         # filtres rapides
         self.model = QStandardItemModel(0, len(COLUMNS))
@@ -279,6 +287,7 @@ class LibraryPanel(QWidget):
         menu = QMenu(self)
         if p["kind"] == "smart":
             menu.addAction("Modifier les règles…", lambda: self._edit_smart(p))
+        menu.addAction("Exporter…", lambda: self._export(p["id"]))
         menu.addAction("Renommer…", lambda: self._rename(p))
         menu.addAction("Supprimer", lambda: self._delete(p))
         menu.exec(self.playlists.mapToGlobal(pos))
@@ -383,3 +392,45 @@ class LibraryPanel(QWidget):
         self._set_row(self.lib.track(track_id), self.lib.tags_by_track().get(track_id, []))
         self.refresh_playlists()  # une playlist intelligente peut dépendre de la qualité
         self.window().statusBar().showMessage("Fichier remplacé", 5000)
+
+    # --- export vers les logiciels DJ
+    def _export(self, selected: int | None = None):
+        if selected is None and self._current_playlist() is not None:
+            selected = self._current_playlist()["id"]
+        dlg = ExportDialog(self.lib, selected, self)
+        if not dlg.exec():
+            return
+        aiff_dir = Path(dlg.aiff_dir.text()) if dlg.convert.isChecked() else None
+        try:
+            ffmpeg, ffprobe = config.ffmpeg_tools(self.lib.get_setting("ffmpeg_dir")) if aiff_dir else (None, None)
+        except FileNotFoundError as e:
+            QMessageBox.warning(self, "Export", str(e))
+            return
+        args = (self.lib, dlg.playlist_ids(), Path(self.lib.get_setting("raw_dir")), dlg.chosen_formats(),
+                Path(dlg.export_dir.text()), aiff_dir, ffmpeg, ffprobe, self._signals.export_progress.emit,
+                version("dj-music-manager"))
+        self.window().statusBar().showMessage("Export en cours…")
+
+        def work():
+            try:
+                self._signals.exported.emit(export.run(*args), "")
+            except Exception as e:
+                self._signals.exported.emit({}, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_exported(self, result: dict, error: str):
+        self.window().statusBar().clearMessage()
+        if error:
+            QMessageBox.warning(self, "Export", f"Export impossible : {error}")
+            return
+        lines = []
+        for key in ("rekordbox", "serato", "m3u8"):
+            if key in result:
+                where = result[key][0].parent if result[key] else "—"
+                lines.append(f"• {len(result[key])} fichier(s) dans {where}\n  "
+                             + HOW_TO[key].format(xml=result[key][0] if result[key] else ""))
+        if result["missing"]:
+            lines.append(f"⚠ {len(result['missing'])} son(s) sans fichier, ignoré(s) :\n"
+                         + "\n".join(result["missing"][:15]))
+        QMessageBox.information(self, "Export terminé", "\n\n".join(lines))
