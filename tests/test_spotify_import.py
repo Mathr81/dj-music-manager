@@ -160,8 +160,8 @@ def test_pasted_list_uses_official_api_when_logged_in(tmp_path):
                     "url": link(track_id), "isrc": "GBDUW0000053"}
 
     lib = Library(tmp_path / "db")
-    existing, _ = lib.add_track({"path": "a.mp3", "artist": "X", "title": "Y", "isrc": "GBDUW0000053",
-                                 "duration": 320.0, "source": "deezer"})
+    existing, _ = lib.add_track({"path": "a.mp3", "artist": "Daft Punk", "title": "One More Time (Remastered)",
+                                 "isrc": "GBDUW0000053", "duration": 330.0, "source": "deezer"})  # durée trop loin : ISRC seul
     p = importer.preview_pasted(importer.Preview(URL, "Set", [], "spotify", total=1), link(sid("sp9")), lib, LoggedIn(),
                                 fetch_public=lambda t: pytest.fail("page publique inutile une fois connecté"))
     assert p.existing == {sid("sp9"): existing}  # reconnu par l'ISRC de l'API officielle

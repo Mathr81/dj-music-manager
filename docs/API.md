@@ -69,11 +69,21 @@ pas de limite de débit côté API). Même format que `/search`, dans l'ordre de
 
 Ensuite, télécharger chaque piste avec `/download?id=` (voir la recette « Télécharger un album »).
 
-### `GET /collection?url=<lien album ou playlist>`
+### `POST /collections?url=<lien album ou playlist>` (recommandé) et `GET /collection?url=…`
 
 Envoie le lien **entier** au bot, qui renvoie toutes les pistes d'un coup : bien plus rapide que piste par piste,
-et c'est la seule voie pour une **playlist Spotify**. Réponse JSON ; les fichiers ne sont pas encore
-téléchargés : récupérer chacun avec `GET <file>` (voir `/file`).
+et c'est la seule voie pour une **playlist Spotify**. Les fichiers ne sont pas encore téléchargés : récupérer
+chacun avec `GET <file>` (voir `/file`).
+
+- `POST /collections` répond tout de suite (`202`, `status: "running"`). Suivre ensuite avec
+  `GET /collections/{id}` toutes les 3 à 5 s : `tracks` grandit au fur et à mesure, et on peut télécharger
+  les pistes déjà listées sans attendre la fin. Le suivi se termine quand `status` vaut `done` ou `error`
+  (`error` contient alors le message).
+- `GET /collection` attend la fin et renvoie le même objet. Au-delà d'environ 100 titres, il risque le timeout du
+  proxy (300 s) : utiliser `POST /collections`.
+- Si `bot` change pendant le suivi (le bot principal a échoué, le secours prend le relais), la liste `tracks`
+  repart de zéro.
+- `GET /collections/{id}` → `404` si l'id est inconnu ou si l'API a redémarré (les collectes sont en mémoire).
 
 | Paramètre | Type | Contraintes |
 |---|---|---|
@@ -82,6 +92,9 @@ téléchargés : récupérer chacun avec `GET <file>` (voir `/file`).
 
 ```json
 {
+  "id": "411471541bbd635f",
+  "status": "done",
+  "error": null,
   "bot": "DeezerMusicBot",
   "tracks": [
     {"file": "/file/DeezerMusicBot/4625", "artist": "Daft Punk", "title": "Lose Yourself to Dance",
@@ -92,7 +105,8 @@ téléchargés : récupérer chacun avec `GET <file>` (voir `/file`).
 
 - Ordre de l'album/playlist. Le bot principal retire les doublons, pas le bot de secours.
 - Une piste introuvable chez le bot est simplement absente : comparer avec la liste attendue si besoin.
-- Durée : 10 à 35 s pour 45 pistes. Pendant ce temps, les autres requêtes vers le même bot attendent.
+- Durée : 10 à 35 s pour 45 pistes, plus 60 s de silence à la fin quand une piste manque chez le bot de secours.
+  Pendant ce temps, les autres requêtes vers le même bot attendent.
 - Erreurs : comme `/download` (`422` refus du bot, `504` bot muet).
 
 ### `GET /file/{bot}/{id}`
@@ -143,7 +157,8 @@ Pour connaître la qualité, **se fier à `X-Real-Quality`/`X-Lossless`**, pas �
 
 Le fichier est déjà tagué : titre, artiste(s), album, artiste d'album, n° de piste/total, disque, date `AAAA-MM-JJ`,
 genre(s), ISRC, code-barres UPC, label, BPM, compositeur, paroles, copyright, pochette (~1200 px).
-Aucun retaggage n'est nécessaire côté client.
+Aucun retaggage n'est nécessaire côté client. Rare exception : si la piste est introuvable chez Deezer (recherche
+sans ISRC qui ne concorde pas en album et en durée), les champs ISRC, UPC, label et total de pistes peuvent manquer.
 
 ### `GET /quality`
 
@@ -329,11 +344,10 @@ with ThreadPoolExecutor(4) as pool:
 Préfixer les noms par un numéro si l'ordre compte : `f"{i:02d} - {name}"` avec `enumerate(tracks, 1)`.
 Compter ~1 min pour un album FLAC de 12 titres hors cache (débit Telegram plafonné).
 
-**Télécharger une playlist Spotify** (un seul appel au bot, puis 4 fichiers en parallèle)
+**Télécharger une playlist Spotify** (un seul appel au bot, téléchargements dès que les pistes arrivent)
 
 ```python
-coll = client.get("/collection", params={"url": "https://open.spotify.com/playlist/2jTy5QwqWJ1ZUv2XeJPYbn",
-                                         "quality": "mp3_320"}).json()
+import time
 
 
 def save_file(track: dict) -> str:
@@ -348,9 +362,23 @@ def save_file(track: dict) -> str:
         return f"{name} [{r.headers['x-real-quality']}]"
 
 
+job = client.post("/collections", params={"url": "https://open.spotify.com/playlist/2jTy5QwqWJ1ZUv2XeJPYbn",
+                                          "quality": "mp3_320"}).json()
+seen, futures = set(), []
 with ThreadPoolExecutor(4) as pool:
-    for line in pool.map(save_file, coll["tracks"]):
-        print(line)
+    while True:
+        job = client.get(f"/collections/{job['id']}").json()
+        for t in job["tracks"]:
+            if t["file"] not in seen:
+                seen.add(t["file"])
+                futures.append(pool.submit(save_file, t))
+        if job["status"] != "running":
+            break
+        time.sleep(4)
+for f in futures:
+    print(f.result())
+if job["status"] == "error":
+    print("collecte en échec :", job["error"])
 ```
 
 **Télécharger en MP3 320**

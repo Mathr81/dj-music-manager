@@ -6,13 +6,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .api_client import ApiClient, ApiError, log
-from .dedup import titles_match
+from .dedup import norm_key, titles_match
 from .importer import match_collection, parse_duration
 from .library import Library
 from .quality.badge import badge
 from .tags import read_tags
 
 MAX_PARALLEL = 4  # au-delà, le débit Telegram (~6 Mo/s pour tout le compte) plafonne
+POLL_SECONDS = 4  # suivi d'une collecte (l'API conseille 3 à 5 s)
+COLLECTION_TIMEOUT = 1800  # s : au-delà, on cesse d'attendre une collecte qui ne finit pas
 
 
 class Cancelled(Exception):
@@ -30,6 +32,7 @@ class Downloader:
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._cancelled: set[int] = set()
+        self.poll_seconds = POLL_SECONDS
 
     # --- pause et annulation
     @property
@@ -159,9 +162,10 @@ class Downloader:
 
     # --- album/playlist entier en un appel au bot
     def submit_collection(self, p, quality: str, job_ids: list[int]) -> threading.Thread:
-        """/collection une seule fois pour tout le lien, puis /file pour chaque piste trouvée ; ce que le bot
-        ne fournit pas passe piste par piste. Si l'aperçu était tronqué (p.total), les fichiers en plus sont
-        les titres manquants : ajoutés s'ils ne sont pas déjà dans la bibliothèque."""
+        """Collecte de tout le lien par le bot (POST /collections, suivi toutes les quelques secondes) : chaque
+        piste part en téléchargement (/file) dès que son fichier arrive. Ce que le bot ne fournit pas passe ensuite
+        piste par piste. Si l'aperçu était tronqué (p.total), les fichiers en plus sont les titres manquants :
+        ajoutés s'ils ne sont pas déjà dans la bibliothèque."""
         for j in job_ids:
             self.on_event("status", j, None)  # visibles « En attente » pendant que le bot prépare
         thread = threading.Thread(target=self._collect, args=(p, quality, job_ids), daemon=True)
@@ -169,45 +173,81 @@ class Downloader:
         return thread
 
     def _collect(self, p, quality: str, job_ids: list[int]):
-        self.on_event("collection", 0, "Le bot prépare l'album ou la playlist entière (jusqu'à quelques minutes)…")
+        jobs_by_track = {self.lib.job(j)["external_id"]: j for j in job_ids}
+        remaining = list(p.tracks)  # pistes attendues sans fichier
+        served: list[dict] = []  # pistes attendues déjà rapprochées d'un fichier
+        seen_files: set[str] = set()
+        extra_keys: set[str | None] = set()
+        submitted: list[int] = []
+        added: list[int] = []
+        position = len(p.tracks)
+        playlist_id = self.lib.playlist_for_source(p.url, p.title) if p.total else None
+        state: dict = {}
+        self.on_event("collection", 0, "Le bot prépare l'album ou la playlist ; chaque piste part dès qu'elle arrive…")
         try:
-            entries = self.api.collection(p.url, quality)
-        except Exception as e:
-            self.on_event("collection", 0, f"Collection indisponible ({e}) : téléchargement piste par piste.")
-            self.submit(job_ids)
-            return
-        matched, extras = match_collection(entries, p.tracks)
-        absent = [f"{t['artist']} – {t['title']}" for t in p.tracks if t["id"] not in matched]
-        if absent and len(entries) < len(p.tracks):
-            log.warning("/collection?url=%s | %d fichier(s) pour %d pistes attendues | absentes : %s",
-                        p.url, len(entries), len(p.tracks), "; ".join(absent[:30]))
-        found = 0
-        for job_id in job_ids:
-            entry = matched.get(self.lib.job(job_id)["external_id"])
-            if entry is not None:
-                self.lib.update_job(job_id, file=entry["file"])
-                found += 1
-        new_ids = []
-        if p.total:
-            playlist_id = self.lib.playlist_for_source(p.url, p.title)
-            for position, e in enumerate(extras, len(p.tracks)):
-                duration = parse_duration(e.get("duration"))
-                track_id = self.lib.find_track(None, e.get("artist"), e.get("title"), duration)
-                if track_id is not None:
-                    self.lib.link(playlist_id, track_id, position)
-                else:
-                    new_ids += self.lib.add_jobs([{
-                        "playlist_id": playlist_id, "position": position, "provider": p.provider,
-                        "file": e["file"], "artist": e.get("artist"), "title": e.get("title"),
-                        "expected_duration": duration, "quality": quality}])
-        message = f"Bot : {found} fichier(s) prêt(s)"
-        if new_ids:
-            message += f", {len(new_ids)} titre(s) en plus de l'aperçu"
-        if found < len(job_ids):
-            message += f" ; {len(job_ids) - found} piste(s) cherchée(s) une par une"
+            state = self.api.start_collection(p.url, quality)
+            deadline = time.monotonic() + COLLECTION_TIMEOUT
+            bot = state.get("bot")
+            while True:
+                if bot and state.get("bot") != bot:  # le secours a pris le relais : sa liste repart de zéro
+                    log.warning("collecte %s (%s) | bot %s remplacé par %s en cours de route",
+                                state.get("id"), p.url, bot, state.get("bot"))
+                bot = state.get("bot") or bot
+                new = [t for t in state["tracks"] if t["file"] not in seen_files]
+                seen_files.update(t["file"] for t in new)
+                matched, unmatched = match_collection(new, remaining)
+                for track_id, entry in matched.items():
+                    served += [t for t in remaining if t["id"] == track_id]
+                    remaining = [t for t in remaining if t["id"] != track_id]
+                    job_id = jobs_by_track.get(track_id)
+                    if job_id is not None:  # sinon déjà dans la bibliothèque : rien à télécharger
+                        self.lib.update_job(job_id, file=entry["file"])
+                        self.submit([job_id])
+                        submitted.append(job_id)
+                if p.total:
+                    _, extras = match_collection(unmatched, served)  # écarte un titre déjà servi par l'autre bot
+                    for e in extras:
+                        key = norm_key(e.get("artist"), e.get("title"))
+                        if key in extra_keys:
+                            continue
+                        extra_keys.add(key)
+                        duration = parse_duration(e.get("duration"))
+                        track_id = self.lib.find_track(None, e.get("artist"), e.get("title"), duration)
+                        if track_id is not None:
+                            self.lib.link(playlist_id, track_id, position)
+                        else:
+                            new_ids = self.lib.add_jobs([{
+                                "playlist_id": playlist_id, "position": position, "provider": p.provider,
+                                "file": e["file"], "artist": e.get("artist"), "title": e.get("title"),
+                                "expected_duration": duration, "quality": quality}])
+                            self.submit(new_ids)
+                            added += new_ids
+                        position += 1
+                self.on_event("collection", 0, f"Bot ({bot}) : {len(seen_files)} fichier(s) reçu(s)…")
+                if state.get("status") != "running" or self._stop.is_set():
+                    break
+                if time.monotonic() > deadline:
+                    log.warning("collecte %s (%s) | toujours « running » après %d min : abandon du suivi",
+                                state.get("id"), p.url, COLLECTION_TIMEOUT // 60)
+                    break
+                time.sleep(self.poll_seconds)
+                state = self.api.collection_status(state["id"])
+            if state.get("status") == "error":
+                log.warning("collecte %s (%s) | status error | %s", state.get("id"), p.url, state.get("error"))
+        except Exception as e:  # erreur déjà journalisée par le client API si elle vient de l'API
+            self.on_event("collection", 0, f"Collecte interrompue ({e}) : le reste passe piste par piste.")
+        if remaining and state:
+            log.warning("collecte %s (%s) | %d piste(s) attendue(s) sur %d absente(s) (%d fichier(s) reçu(s)) : %s",
+                        state.get("id"), p.url, len(remaining), len(p.tracks), len(seen_files),
+                        "; ".join(f"{t['artist']} – {t['title']}" for t in remaining[:30]))
+        rest = [j for j in job_ids if j not in submitted]
+        message = f"Bot : {len(submitted)} piste(s) par la collecte"
+        if added:
+            message += f", {len(added)} titre(s) en plus de l'aperçu"
+        if rest:
+            message += f" ; {len(rest)} cherchée(s) une par une"
         self.on_event("collection", 0, message)
-        self.submit(job_ids + new_ids)
-
+        self.submit(rest)
 
 def closest(results: list[dict], duration: float | None) -> dict | None:
     """Résultat de /search dont la durée est la plus proche de celle attendue."""

@@ -61,12 +61,16 @@ Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin 
 Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titre normalisés ± 3 s.
 Jamais par nom de fichier.
 
-Téléchargement d'un album ou d'une playlist : **un seul appel `/collection`** au bot pour tout le lien, chaque piste
-attendue est rapprochée d'un fichier (artiste + titre normalisés, durée ± 3 s) puis récupérée par `/file`.
+Téléchargement d'un album ou d'une playlist : **une seule collecte** par le bot pour tout le lien
+(`POST /collections`, suivie toutes les 4 s) ; chaque fichier qui arrive est rapproché d'une piste attendue
+(artiste + titre normalisés, durée ± 3 s) et part aussitôt en téléchargement par `/file`, sans attendre la fin.
+Si le bot de secours prend le relais en cours de route, les pistes déjà servies ne sont pas retéléchargées.
 Ce que le bot ne fournit pas (il omet en silence ce qu'il ne trouve pas, surtout le bot de secours) passe piste par
 piste : `/download?id=` (Deezer) ou `/download?url=` (Spotify), puis repli `/search` sur la durée la plus proche.
 Si `/collection` échoue, tout passe piste par piste. Après chaque téléchargement, le titre du fichier reçu est
 comparé au titre attendu : un autre morceau renvoyé par le bot va dans **Échecs** au lieu d'être rangé en silence.
+Un même ISRC ne suffit pas à fusionner deux sons dont les titres n'ont rien à voir (ISRC mal étiqueté par l'API) :
+le conflit est noté dans le journal de l'API.
 
 ## File d'attente, échecs et journal de l'API
 

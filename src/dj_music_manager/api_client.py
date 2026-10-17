@@ -14,6 +14,7 @@ from .files import reserve
 
 QUALITIES = ("flac", "mp3_320", "mp3_128")
 FILE_PATH_RE = re.compile(r"^/file/[A-Za-z0-9_.-]+/\d+$")
+COLLECTION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # journal des erreurs de l'API (fichier configuré au démarrage de l'app) : sert à corriger et améliorer l'API
 log = logging.getLogger("dj_music_manager.api")
 
@@ -94,13 +95,13 @@ class ApiClient:
                         type(e).__name__, e)
             raise ApiError(0, f"erreur réseau ({type(e).__name__}) : {e}") from e
 
-    def _get_json(self, path: str, params: dict, timeout: float | None = None):
+    def _get_json(self, path: str, params: dict, method: str = "GET"):
         def call():
-            r = self._http.get(path, params=params, **({"timeout": timeout} if timeout else {}))
-            if r.status_code != 200:
+            r = self._http.request(method, path, params=params)
+            if r.status_code not in (200, 202):
                 raise ApiError(r.status_code, error_message(r))
             return r.json()
-        return self._logged(path, params, call)
+        return self._logged(f"{method} {path}" if method != "GET" else path, params, call)
 
     @staticmethod
     def _retry_504(call):
@@ -118,17 +119,27 @@ class ApiClient:
     def search(self, q: str) -> list[dict]:
         return self._get_json("/search", {"q": q})
 
-    def collection(self, url: str, quality: str) -> list[dict]:
-        """Toutes les pistes d'un album/playlist en un appel au bot ; fichiers à récupérer avec file().
-        Une piste que le bot ne trouve pas est simplement absente."""
-        # ~10-35 s pour 45 pistes, bien plus si le bot de secours prend le relais : délai large
-        data = self._retry_504(lambda: self._get_json("/collection", {"url": url, "quality": quality}, timeout=900))
-        tracks = data.get("tracks", [])
+    def start_collection(self, url: str, quality: str) -> dict:
+        """Lance la collecte d'un album/playlist par le bot (réponse immédiate, status « running »).
+        Suivre avec collection_status() ; une piste que le bot ne trouve pas est simplement absente."""
+        return self._checked(self._retry_504(
+            lambda: self._get_json("/collections", {"url": url, "quality": quality}, method="POST")))
+
+    def collection_status(self, collection_id: str) -> dict:
+        """{id, status: running|done|error, error, bot, tracks: [{file, artist, title, duration…}]}."""
+        if not COLLECTION_ID_RE.match(collection_id):  # id fourni par le serveur : reste dans /collections/
+            raise ApiError(0, f"identifiant de collecte invalide : {collection_id!r}")
+        return self._checked(self._get_json(f"/collections/{collection_id}", {}))
+
+    @staticmethod
+    def _checked(state: dict) -> dict:
+        """Ne garde que les pistes au chemin « file » sûr (jamais d'URL vers un autre hôte avec la clé)."""
+        tracks = state.get("tracks") or []
         safe = [t for t in tracks if FILE_PATH_RE.match(str(t.get("file", "")))]
         if len(safe) < len(tracks):
-            log.warning("/collection?url=%s | %d chemin(s) « file » invalides ignorés : %s", url,
+            log.warning("collecte %s | %d chemin(s) « file » invalides ignorés : %s", state.get("id"),
                         len(tracks) - len(safe), [t.get("file") for t in tracks if t not in safe][:5])
-        return safe
+        return {**state, "tracks": safe}
 
     def download(self, dest_dir: Path, quality: str, *, id: str | None = None, url: str | None = None,
                  on_progress=None) -> Download:

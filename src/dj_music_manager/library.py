@@ -1,6 +1,7 @@
 """Bibliothèque SQLite : sons, ID externes, playlists, tags, file de téléchargement, réglages."""
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -8,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import smart
-from .dedup import norm_key, norm_text, same_duration
+from .dedup import norm_key, norm_text, same_duration, titles_match
 
 # une entrée par version du schéma, appliquée selon PRAGMA user_version
 MIGRATIONS = [
@@ -72,6 +73,8 @@ MIGRATIONS = [
     "ALTER TABLE jobs ADD COLUMN file TEXT;",
 ]
 
+api_log = logging.getLogger("dj_music_manager.api")  # anomalies des données renvoyées par l'API
+
 TRACK_FIELDS = ("path", "isrc", "artist", "title", "album", "duration", "expected_duration", "bpm", "format",
                 "quality", "source", "real_quality", "lossless", "max_frequency", "badge", "quality_origin")
 JOB_FIELDS = ("playlist_id", "position", "provider", "external_id", "url", "file", "artist", "title",
@@ -131,11 +134,14 @@ class Library:
 
     def find_track(self, isrc: str | None, artist: str | None, title: str | None,
                    duration: float | None) -> int | None:
-        """ISRC, puis artiste + titre normalisés avec durée ±3 s."""
+        """ISRC (si le titre concorde), puis artiste + titre normalisés avec durée ±3 s."""
         if isrc:
-            row = self._one("SELECT id FROM tracks WHERE isrc = ? LIMIT 1", isrc.upper())
-            if row:
-                return row[0]
+            for row in self._all("SELECT id, artist, title FROM tracks WHERE isrc = ?", isrc.upper()):
+                if titles_match(row["title"], title):
+                    return row["id"]
+                # ISRC mal étiqueté (vu sur le bot de secours : décalé d'une piste) : on ne fusionne pas
+                api_log.warning("ISRC %s porté par « %s – %s » et par « %s – %s » : titres différents, pas fusionnés",
+                                isrc.upper(), row["artist"], row["title"], artist, title)
         key = norm_key(artist, title)
         if key:
             for row in self._all("SELECT id, duration FROM tracks WHERE norm_key = ?", key):

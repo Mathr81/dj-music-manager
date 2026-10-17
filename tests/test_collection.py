@@ -1,7 +1,8 @@
-"""/collection + /file : un appel au bot pour tout le lien, repli piste par piste, titres en plus."""
+"""POST /collections + suivi + /file : collecte de tout le lien, repli piste par piste, titres en plus."""
 
 import shutil
 import subprocess
+import threading
 
 import httpx
 import pytest
@@ -20,11 +21,26 @@ def client(handler) -> ApiClient:
 
 
 def test_collection_keeps_only_safe_file_paths():
-    body = {"bot": "x", "tracks": [{"file": "/file/MusicsHuntersbot/12", "artist": "A", "title": "B"},
-                                   {"file": "https://ailleurs.example/vol", "artist": "C", "title": "D"},
-                                   {"file": "/file/../../admin", "artist": "E", "title": "F"}]}
-    tracks = client(lambda r: httpx.Response(200, json=body)).collection(URL, "mp3_320")
-    assert [t["file"] for t in tracks] == ["/file/MusicsHuntersbot/12"]
+    body = {"id": "abc", "status": "running", "bot": "x", "tracks": [
+        {"file": "/file/MusicsHuntersbot/12", "artist": "A", "title": "B"},
+        {"file": "https://ailleurs.example/vol", "artist": "C", "title": "D"},
+        {"file": "/file/../../admin", "artist": "E", "title": "F"}]}
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(202, json=body)
+
+    state = client(handler).start_collection(URL, "mp3_320")
+    assert (seen[0].method, seen[0].url.path, dict(seen[0].url.params)) == (
+        "POST", "/collections", {"url": URL, "quality": "mp3_320"})
+    assert [t["file"] for t in state["tracks"]] == ["/file/MusicsHuntersbot/12"]
+    assert state["id"] == "abc" and state["status"] == "running"
+
+
+def test_collection_status_refuses_strange_ids():
+    with pytest.raises(ApiError, match="invalide"):
+        client(lambda r: pytest.fail("aucune requête ne doit partir")).collection_status("../../admin")
 
 
 def test_file_refuses_foreign_urls_so_the_key_never_leaves(tmp_path):
@@ -40,7 +56,7 @@ def test_collection_retried_once_on_504():
         return httpx.Response(504, json={"detail": "bot muet"})
 
     with pytest.raises(ApiError):
-        client(handler).collection(URL, "flac")
+        client(handler).start_collection(URL, "flac")
     assert len(calls) == 2 and dict(calls[0].url.params) == {"url": URL, "quality": "flac"}
 
 
@@ -76,27 +92,42 @@ def audio(tmp_path_factory):
     return out
 
 
-def run_import(tmp_path, audio, collection_status=200):
+UN = {"file": "/file/bot/1", "artist": "A", "title": "Un", "duration": "0:01"}
+LA = {"file": "/file/bot/2", "artist": "Déjà", "title": "Là", "duration": "3:20"}  # déjà en bibliothèque
+PLUS = {"file": "/file/bot/3", "artist": "C", "title": "Plus", "duration": "0:01"}  # au-delà des 100 publics
+
+
+def state(status, tracks, bot="MusicsHuntersbot"):
+    return {"id": "c0ffee", "status": status, "error": None, "bot": bot, "tracks": tracks}
+
+
+def run_import(tmp_path, audio, states=None, collection_status=202):
+    """states : réponses successives de la collecte (POST puis chaque suivi ; la dernière se répète)."""
     raw = tmp_path / "RAW"
     raw.mkdir()
     lib = Library(tmp_path / "db")
     lib.set_setting("raw_dir", str(raw))
     known, _ = lib.add_track({"path": "x.mp3", "artist": "Déjà", "title": "Là", "duration": 200.0, "source": "manual"})
+    states = list(states or [state("running", [UN]), state("done", [UN, LA, PLUS])])
     calls = []
+    first_file = threading.Event()
 
     def handler(request):
         path, params = request.url.path, dict(request.url.params)
-        calls.append(path if path != "/download" else f"/download?{'&'.join(f'{k}={v}' for k, v in params.items())}")
-        if path == "/collection":
-            if collection_status != 200:
+        if path == "/download":
+            calls.append(f"/download?{'&'.join(f'{k}={v}' for k, v in params.items())}")
+        else:
+            calls.append(f"{request.method} {path}" if path.startswith("/collections") else path)
+        if path.startswith("/file"):
+            first_file.set()
+        if request.method == "GET" and path.startswith("/collections") and not calls.count("early"):
+            calls.append("early" if first_file.wait(5) else "late")  # le suivi attend un 1er téléchargement
+        if path.startswith("/collections"):
+            if collection_status != 202:
                 return httpx.Response(collection_status, json={"detail": "bot muet"})
-            return httpx.Response(200, json={"bot": "MusicsHuntersbot", "tracks": [
-                {"file": "/file/bot/1", "artist": "A", "title": "Un", "duration": "0:01"},
-                {"file": "/file/bot/2", "artist": "Déjà", "title": "Là", "duration": "3:20"},  # déjà en bibliothèque
-                {"file": "/file/bot/3", "artist": "C", "title": "Plus", "duration": "0:01"},  # au-delà des 100
-            ]})
-        name = {"/file/bot/1": "un", "/file/bot/3": "plus"}.get(path) or (
-            "un" if params.get("url", "").endswith("/s1") else "deux")
+            return httpx.Response(202, json=states.pop(0) if len(states) > 1 else states[0])
+        name = {"/file/bot/1": "un", "/file/bot/3": "plus", "/file/secours/1": "un", "/file/secours/3": "plus"}.get(
+            path) or ("un" if params.get("url", "").endswith("/s1") else "deux")
         return httpx.Response(200, content=audio[name], headers={
             "content-disposition": f'attachment; filename="{name}.flac"', "x-real-quality": "Lossless"})
 
@@ -104,6 +135,7 @@ def run_import(tmp_path, audio, collection_status=200):
     p = Preview(URL, "ÉTÉ 2K26", [track("s1", "A", "Un", 1.0), track("s2", "B", "Deux", 1.0)], "spotify", total=4)
     job_ids = importer.queue(lib, p, "flac")
     d = Downloader(api, lib)
+    d.poll_seconds = 0.01
     d.submit_collection(p, "flac", job_ids).join()
     d.close(wait=True)
     return lib, calls, known
@@ -112,9 +144,10 @@ def run_import(tmp_path, audio, collection_status=200):
 def test_collection_then_fallback_and_extra_tracks(tmp_path, audio):
     lib, calls, known = run_import(tmp_path, audio)
 
-    assert calls[0] == "/collection"
-    assert sorted(calls[1:]) == sorted([  # « Deux » absent du bot : repli piste par piste
-        "/file/bot/1", "/download?url=https://open.spotify.com/track/s2&quality=flac", "/file/bot/3"])
+    assert calls[0] == "POST /collections"
+    assert "early" in calls  # « Un » est parti pendant que la collecte tournait encore
+    assert sorted(c for c in calls if c.startswith(("/file", "/download"))) == sorted([
+        "/file/bot/1", "/file/bot/3", "/download?url=https://open.spotify.com/track/s2&quality=flac"])  # « Deux » absent
     assert lib.failed_jobs() == []
     titles = {t["id"]: t["title"] for t in lib.tracks()}
     playlist = lib.playlist_track_ids(lib.playlists()[0]["id"])
@@ -123,9 +156,22 @@ def test_collection_then_fallback_and_extra_tracks(tmp_path, audio):
     assert lib.track_by_external("spotify", "s1") is not None
 
 
+def test_bot_switch_restarts_the_list_without_duplicates(tmp_path, audio):
+    secours_un = {**UN, "file": "/file/secours/1"}
+    secours_plus = {**PLUS, "file": "/file/secours/3"}
+    lib, calls, _ = run_import(tmp_path, audio, states=[
+        state("running", [UN]),
+        state("running", [], bot="DeezerMusicBot"),  # le secours reprend de zéro
+        state("done", [secours_un, LA, secours_plus], bot="DeezerMusicBot")])
+    downloads = [c for c in calls if c.startswith(("/file", "/download"))]
+    assert "/file/secours/1" not in downloads  # « Un » déjà servi par le premier bot
+    assert downloads.count("/file/secours/3") == 1 and lib.failed_jobs() == []
+    assert len(lib.tracks()) == 4  # Là (déjà là) + un + deux + plus
+
+
 def test_collection_failure_falls_back_to_track_by_track(tmp_path, audio):
     lib, calls, _ = run_import(tmp_path, audio, collection_status=504)
-    assert calls[:2] == ["/collection", "/collection"]  # un seul nouvel essai
+    assert calls[:2] == ["POST /collections", "POST /collections"]  # un seul nouvel essai
     assert sorted(calls[2:]) == ["/download?url=https://open.spotify.com/track/s1&quality=flac",
                                  "/download?url=https://open.spotify.com/track/s2&quality=flac"]
     assert lib.failed_jobs() == [] and len(lib.tracks()) == 3

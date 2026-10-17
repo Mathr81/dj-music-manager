@@ -125,8 +125,8 @@ def test_incomplete_collection_and_wrong_file_are_logged(lib, caplog):
         d.pause()  # on ne teste que le rapprochement et le journal, pas les téléchargements
         d.submit_collection(p, "flac", jobs).join()
         d.close()
-    message = next(r.getMessage() for r in caplog.records if "pistes attendues" in r.getMessage())
-    assert "1 fichier(s) pour 2 pistes attendues" in message and "B – Absente" in message
+    message = next(r.getMessage() for r in caplog.records if "absente(s)" in r.getMessage())
+    assert "1 piste(s) attendue(s) sur 2 absente(s) (1 fichier(s) reçu(s))" in message and "B – Absente" in message
 
 
 def test_wrong_file_is_logged_with_its_source(lib, caplog, tmp_path):
