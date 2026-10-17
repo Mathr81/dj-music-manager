@@ -9,6 +9,7 @@ dependencies = [
     "mutagen>=1.47",
     "keyring>=25",
     "numpy>=2",
+    "send2trash>=1.8",
 ]
 
 [project.gui-scripts]

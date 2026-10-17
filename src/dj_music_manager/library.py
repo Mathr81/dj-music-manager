@@ -162,6 +162,18 @@ class Library:
                 db.execute("INSERT OR IGNORE INTO external_ids VALUES(?, ?, ?)", (provider, str(external_id), track_id))
         return track_id, created
 
+    def update_track(self, track_id: int, fields: dict):
+        """Met à jour un son sans changer son ID (playlists, tags et ID externes suivent)."""
+        values = {k: v for k, v in fields.items() if k in TRACK_FIELDS}
+        if "artist" in values or "title" in values:
+            current = self.track(track_id)
+            values["norm_key"] = norm_key(values.get("artist", current["artist"]), values.get("title", current["title"]))
+        if values.get("isrc"):
+            values["isrc"] = values["isrc"].upper()
+        with self._tx() as db:
+            db.execute(f"UPDATE tracks SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
+                       (*values.values(), track_id))
+
     def track_by_path(self, path: str) -> int | None:
         row = self._one("SELECT id FROM tracks WHERE path = ?", path)
         return row[0] if row else None

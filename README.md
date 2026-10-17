@@ -38,7 +38,7 @@ d'autre, copie ses titres dans une playlist à toi. Les albums fonctionnent tous
 | `library.py` | SQLite : schéma, migrations (`PRAGMA user_version`), requêtes |
 | `importer.py` | aperçu dédoublonné d'un lien, création des jobs |
 | `downloader.py` | 4 téléchargements simultanés, échecs isolés et relançables |
-| `manual.py` | ajout manuel (glisser-déposer, scan) : même dédoublonnage, copie dans RAW |
+| `manual.py` | ajout manuel (glisser-déposer, scan) et remplacement d'un son : même dédoublonnage, copie dans RAW |
 | `files.py` | écriture dans RAW sans jamais écraser |
 | `tags.py` | lecture des tags (jamais d'écriture) |
 | `smart.py` | règles des playlists intelligentes -> SQL paramétré |
@@ -72,6 +72,14 @@ MP3 128/192/256/320/V0, AAC, Vorbis, faux FLAC issus de MP3 128 et 192, MP3 128 
   Une playlist ne contient que des références : la supprimer ne touche jamais aux sons.
 - **Filtres rapides** : recherche multi-mots (artiste, titre, album, tags), tag, qualité, plage de BPM.
 
+## Remplacer un son par une meilleure version
+
+Clic droit sur un son → **Remplacer le fichier…** (achat en 320, AIFF…). Le son garde son ID interne : playlists,
+tags et ID Deezer/Spotify suivent, et un réimport ne le retélécharge pas. Le nouveau fichier est copié dans RAW et
+analysé ; l'ancien part dans la corbeille Windows. Les métadonnées connues sont conservées, le nouveau fichier ne
+complète que les champs vides. Avant de remplacer, l'app prévient si le fichier ressemble à un autre son de la
+bibliothèque ou si sa durée diffère de plus de 10 s.
+
 ## Feuille de route
 
 1. ~~MVP : lien Deezer → téléchargement dans RAW avec dédoublonnage → liste avec badge qualité~~
@@ -79,6 +87,6 @@ MP3 128/192/256/320/V0, AAC, Vorbis, faux FLAC issus de MP3 128 et 192, MP3 128 
 3. ~~Ajout manuel (glisser-déposer, scan) + analyse qualité locale portée de
    [whatsmybitrate](https://github.com/oren-cohen/whatsmybitrate) (MIT), validée contre la CLI d'origine~~
 4. ~~Tags, playlists manuelles et intelligentes, filtres~~
-5. Remplacement d'un son par une meilleure version (même ID interne)
+5. ~~Remplacement d'un son par une meilleure version (même ID interne)~~
 6. Export rekordbox.xml (+ option FLAC → AIFF)
 7. Paquet PyInstaller avec ffmpeg embarqué

@@ -12,7 +12,9 @@ pytestmark = pytest.mark.skipif(not (FFMPEG and FFPROBE), reason="ffmpeg absent"
 
 def make(path, isrc="", artist="Artiste", title="Titre", secs=12):
     path.parent.mkdir(parents=True, exist_ok=True)
-    meta = ["-metadata", f"artist={artist}", "-metadata", f"title={title}"] + (["-metadata", f"ISRC={isrc}"] if isrc else [])
+    isrc_key = "TSRC" if path.suffix == ".mp3" else "ISRC"  # ffmpeg écrit « ISRC » en TXXX dans un MP3
+    meta = ["-metadata", f"artist={artist}", "-metadata", f"title={title}"] + (
+        ["-metadata", f"{isrc_key}={isrc}"] if isrc else [])
     subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"anoisesrc=duration={secs}", *meta, str(path)],
                    check=True)
     return path

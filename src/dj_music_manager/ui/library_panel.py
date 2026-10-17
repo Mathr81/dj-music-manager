@@ -1,13 +1,16 @@
 """Vue bibliothèque : playlists à gauche, filtres rapides, liste des sons, tags et playlists au clic droit."""
 
 import json
+import threading
+from pathlib import Path
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt
+from PySide6.QtCore import QObject, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSpinBox,
-                               QSplitter, QTableView, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
+                               QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
 
+from .. import config, manual
 from ..library import Library
 from ..quality.badge import BADGES
 from .dialogs import fmt_duration
@@ -74,10 +77,16 @@ class TrackFilter(QSortFilterProxyModel):
         return super().data(index, role)
 
 
+class _Signals(QObject):
+    replaced = Signal(int, str)  # ID du son, message d'erreur (vide si réussi)
+
+
 class LibraryPanel(QWidget):
     def __init__(self, lib: Library, parent=None):
         super().__init__(parent)
         self.lib = lib
+        self._signals = _Signals(self)
+        self._signals.replaced.connect(self._on_replaced)
         self._rows: dict[int, int] = {}  # ID interne -> ligne du modèle source
         self._shown = -1  # playlist affichée (None = toute la bibliothèque)
 
@@ -146,7 +155,7 @@ class LibraryPanel(QWidget):
 
         tags = lib.tags_by_track()
         for t in lib.tracks():
-            self._add_row(t, tags.get(t["id"], []))
+            self._set_row(t, tags.get(t["id"], []))
         self.refresh_tags()
         self.refresh_playlists()
 
@@ -154,11 +163,11 @@ class LibraryPanel(QWidget):
     def show_track(self, track_id: int):
         """Affiche un son arrivé dans la bibliothèque (téléchargé ou ajouté à la main)."""
         if track_id not in self._rows:
-            self._add_row(self.lib.track(track_id), [])
+            self._set_row(self.lib.track(track_id), [])
         self.refresh_playlists()  # compteurs et contenu de la playlist affichée
 
-    def _add_row(self, t, tags: list[str]):
-        self._rows[t["id"]] = self.model.rowCount()
+    def _set_row(self, t, tags: list[str]):
+        """Ajoute la ligne du son, ou la remplace si elle existe déjà."""
         duration = _item(fmt_duration(t["duration"]), t["duration"] or 0)
         if t["expected_duration"] and t["duration"] and abs(t["duration"] - t["expected_duration"]) > DURATION_WARNING:
             duration.setText("⚠ " + duration.text())
@@ -170,11 +179,18 @@ class LibraryPanel(QWidget):
             quality.setForeground(QColor(BADGE_COLORS[t["badge"]]))
         first = _item("", 0)
         first.setData(t["id"], ID_ROLE)
-        self.model.appendRow([
+        items = [
             first, _item(t["artist"]), _item(t["title"]), quality, duration,
             _item(f"{t['bpm']:.0f}" if t["bpm"] else "", t["bpm"] or 0), self._tags_item(tags),
             _item(t["format"]), _item(t["album"]), _item(t["added_at"].replace("T", " "), t["added_at"]),
-        ])
+        ]
+        row = self._rows.get(t["id"])
+        if row is None:
+            self._rows[t["id"]] = self.model.rowCount()
+            self.model.appendRow(items)
+        else:
+            for col, item in enumerate(items):
+                self.model.setItem(row, col, item)
 
     @staticmethod
     def _tags_item(tags: list[str]) -> QStandardItem:
@@ -291,6 +307,9 @@ class LibraryPanel(QWidget):
         if not ids:
             return
         menu = QMenu(self)
+        if len(ids) == 1:
+            menu.addAction("Remplacer le fichier…", lambda: self._replace(ids[0]))
+            menu.addSeparator()
         menu.addAction("Ajouter des tags…", lambda: self._add_tags(ids))
         tags = self.lib.tags_by_track()
         present = sorted({t for i in ids for t in tags.get(i, [])}, key=str.casefold)
@@ -324,3 +343,43 @@ class LibraryPanel(QWidget):
     def _remove_from(self, playlist_id: int, ids: list[int]):
         self.lib.remove_from_playlist(playlist_id, ids)
         self.refresh_playlists()
+
+    # --- remplacement par une meilleure version
+    def _replace(self, track_id: int):
+        exts = " ".join(f"*{e}" for e in sorted(manual.AUDIO_EXTS))
+        path, _ = QFileDialog.getOpenFileName(self, "Nouvelle version du son", "", f"Audio ({exts})")
+        if not path:
+            return
+        try:
+            ffmpeg, ffprobe = config.ffmpeg_tools(self.lib.get_setting("ffmpeg_dir"))
+            warnings = manual.replace_warnings(self.lib, track_id, Path(path))
+        except Exception as e:
+            QMessageBox.warning(self, "Remplacer", str(e))
+            return
+        t = self.lib.track(track_id)
+        text = (f"Remplacer le fichier de « {t['artist']} – {t['title']} » par « {Path(path).name} » ?\n\n"
+                "Playlists et tags sont conservés ; l'ancien fichier ira dans la corbeille.")
+        if warnings:
+            text += "\n\n" + "\n".join(f"⚠ {w}" for w in warnings)
+        if QMessageBox.question(self, "Remplacer", text) != QMessageBox.Yes:
+            return
+        self.window().statusBar().showMessage(f"Analyse de {Path(path).name}…")
+        raw = Path(self.lib.get_setting("raw_dir"))
+
+        def work():
+            try:
+                manual.replace_file(self.lib, track_id, Path(path), raw, ffmpeg, ffprobe)
+                self._signals.replaced.emit(track_id, "")
+            except Exception as e:
+                self._signals.replaced.emit(track_id, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_replaced(self, track_id: int, error: str):
+        self.window().statusBar().clearMessage()
+        if error:
+            QMessageBox.warning(self, "Remplacer", f"Remplacement impossible : {error}")
+            return
+        self._set_row(self.lib.track(track_id), self.lib.tags_by_track().get(track_id, []))
+        self.refresh_playlists()  # une playlist intelligente peut dépendre de la qualité
+        self.window().statusBar().showMessage("Fichier remplacé", 5000)
