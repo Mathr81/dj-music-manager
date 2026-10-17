@@ -64,9 +64,11 @@ class SettingsDialog(QDialog):
         form.addRow("Spotify Client ID", self.spotify_id)
         form.addRow("", spotify_row)
         help_label = QLabel(
-            "Crée une app sur <a href='https://developer.spotify.com/dashboard'>developer.spotify.com</a> "
-            f"(Web API) avec l'URI de redirection <code>{spotify.REDIRECT_URI}</code>.<br>"
-            "Le compte propriétaire de l'app doit être Premium.", openExternalLinks=True)
+            "Facultatif : les playlists publiques s'importent sans connexion (100 premiers titres).<br>"
+            "La connexion sert à tes playlists privées ou de plus de 100 titres : crée une app sur "
+            "<a href='https://developer.spotify.com/dashboard'>developer.spotify.com</a> (Web API) avec l'URI "
+            f"de redirection <code>{spotify.REDIRECT_URI}</code> ; ton compte doit être Premium.",
+            openExternalLinks=True, wordWrap=True)
         form.addRow(help_label)
         form.addRow("Dossier ffmpeg", self.ffmpeg)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -139,6 +141,10 @@ class ImportDialog(QDialog):
         layout.addWidget(QLabel(
             f"<b>{preview.title}</b> : {plural(len(preview.tracks), 'piste')}<br>"
             f"{len(preview.existing)} déjà dans la bibliothèque, <b>{plural(n_new, 'nouvelle')}</b>"))
+        if preview.warning:
+            warning = QLabel(f"⚠ {preview.warning}", wordWrap=True, maximumWidth=480)
+            warning.setStyleSheet("color: #ef6c00")
+            layout.addWidget(warning)
         self.quality = _quality_combo(quality)
         row = QHBoxLayout()
         row.addWidget(QLabel("Qualité"))

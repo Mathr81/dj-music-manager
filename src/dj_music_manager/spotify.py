@@ -1,11 +1,14 @@
-"""API Web Spotify : pistes d'un album ou d'une playlist, connexion OAuth PKCE (sans secret client).
+"""Pistes d'un album ou d'une playlist Spotify.
 
-Depuis février 2026, une app en mode développeur ne reçoit le contenu que des playlists possédées
-ou co-éditées par l'utilisateur connecté, et son propriétaire doit avoir Spotify Premium.
+- API Web officielle avec connexion OAuth PKCE (sans secret client). Depuis février 2026, une app en mode
+  développeur ne reçoit le contenu que des playlists possédées ou co-éditées par l'utilisateur connecté.
+- Sans connexion, ou pour la playlist publique de quelqu'un d'autre : page d'intégration publique (lecteur
+  « embed »), qui ne liste que les 100 premiers titres.
 """
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 import time
@@ -24,14 +27,63 @@ SCOPES = "playlist-read-private playlist-read-collaborative"
 LINK_RE = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]{2}/)?|spotify:)(playlist|album)[/:]([A-Za-z0-9]{22})")
 NOT_OWNED = ("Spotify ne donne le contenu que des playlists que tu possèdes ou co-édites. "
              "Copie ses titres dans une playlist à toi (Ctrl+A, « Ajouter à la playlist ») puis réessaie.")
+EMBED_URL = "https://open.spotify.com/embed/{kind}/{id}"
+PAGE_URL = "https://open.spotify.com/{kind}/{id}"
+EMBED_LIMIT = 100  # la page d'intégration ne liste pas au-delà
+_NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
 
 
 class SpotifyError(Exception):
     pass
 
 
+class NotOwnedError(SpotifyError):
+    """L'API officielle ne livre pas le contenu de cette playlist (pas à l'utilisateur connecté)."""
+
+
 def is_spotify_link(url: str) -> bool:
     return LINK_RE.search(url) is not None
+
+
+def public_collection(url: str, transport: httpx.BaseTransport | None = None) -> tuple[str, list[dict], int | None]:
+    """Sans connexion, par la page d'intégration publique : (nom, pistes, nombre total de titres si tronqué).
+    shortcut: dépend du format interne de la page embed ; à adapter si Spotify le change."""
+    m = LINK_RE.search(url)
+    if not m:
+        raise SpotifyError(f"lien Spotify non reconnu : {url}")
+    kind, sid = m[1], m[2]
+    with httpx.Client(timeout=20, transport=transport, follow_redirects=True,
+                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}) as http:
+        r = http.get(EMBED_URL.format(kind=kind, id=sid))
+        if r.status_code == 404:
+            raise SpotifyError("playlist ou album Spotify introuvable (privé ou supprimé ?)")
+        if r.status_code != 200:
+            raise SpotifyError(f"page Spotify inaccessible ({r.status_code})")
+        try:
+            entity = json.loads(_NEXT_DATA_RE.search(r.text)[1])["props"]["pageProps"]["state"]["data"]["entity"]
+            name, items = entity["name"], entity.get("trackList", [])
+        except (TypeError, KeyError, ValueError) as e:
+            raise SpotifyError("format de la page Spotify inattendu : l'import public est peut-être à mettre à jour") from e
+        tracks = []
+        for t in items:
+            uri = t.get("uri", "")
+            if not uri.startswith("spotify:track:"):
+                continue  # épisodes de podcast
+            track_id = uri.rsplit(":", 1)[1]
+            tracks.append({
+                "id": track_id,
+                "artist": t.get("subtitle", "").replace("\xa0", " "),  # « Artiste 1, Artiste 2 »
+                "title": t["title"],
+                "duration": t["duration"] / 1000,
+                "url": f"https://open.spotify.com/track/{track_id}",
+                "isrc": None,
+            })
+        total = None
+        if len(tracks) >= EMBED_LIMIT:  # peut-être tronquée : le vrai total est sur la page publique
+            page = http.get(PAGE_URL.format(kind=kind, id=sid))
+            count = re.search(r'<meta name="music:song_count" content="(\d+)"', page.text)
+            total = int(count[1]) if count else None
+    return name, tracks, total
 
 
 def authorize(client_id: str, open_browser=webbrowser.open, timeout: float = 180,
@@ -132,11 +184,11 @@ class Spotify:
         meta = self._get(f"/{kind}s/{sid}")
         if kind == "playlist":
             if "items" not in meta and "tracks" not in meta:
-                raise SpotifyError(NOT_OWNED)
+                raise NotOwnedError(NOT_OWNED)
             try:
                 page = self._get(f"/playlists/{sid}/items", {"limit": 50})
             except SpotifyError as e:
-                raise SpotifyError(NOT_OWNED) if " 403 " in str(e) else e
+                raise NotOwnedError(NOT_OWNED) if " 403 " in str(e) else e
         else:
             page = self._get(f"/albums/{sid}/tracks", {"limit": 50})
         tracks = []

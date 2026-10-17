@@ -1,10 +1,12 @@
+import json
 import threading
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 
-from dj_music_manager.spotify import NOT_OWNED, REDIRECT_URI, Spotify, SpotifyError, authorize, is_spotify_link
+from dj_music_manager.spotify import (NOT_OWNED, REDIRECT_URI, Spotify, SpotifyError, authorize, is_spotify_link,
+                                      public_collection)
 
 PID = "37i9dQZF1DXcBWIGoYBM5M"
 
@@ -93,3 +95,46 @@ def test_authorize_pkce_roundtrip():
     assert authorize("cid", fake_browser, timeout=10, transport=httpx.MockTransport(token_handler)) == "R"
     body = exchanged[0]
     assert body["code"] == ["C0DE"] and body["client_id"] == ["cid"] and len(body["code_verifier"][0]) >= 43
+
+
+def embed_page(name: str, items: list[dict]) -> str:
+    data = {"props": {"pageProps": {"state": {"data": {"entity": {"name": name, "trackList": items}}}}}}
+    return f'<html><script id="__NEXT_DATA__" type="application/json">{json.dumps(data)}</script></html>'
+
+
+def embed_item(i: int, artists: str = "Vacra,\xa0La Rvfleuze") -> dict:
+    return {"uri": f"spotify:track:{i:022d}", "title": f"Titre {i}", "subtitle": artists, "duration": 169586}
+
+
+def public_transport(embed_html: str, song_count: int | None = None, status: int = 200):
+    def handler(request):
+        if request.url.path.startswith("/embed/"):
+            return httpx.Response(status, text=embed_html)
+        meta = f'<meta name="music:song_count" content="{song_count}"/>' if song_count else ""
+        return httpx.Response(200, text=f"<html><head>{meta}</head></html>")
+    return httpx.MockTransport(handler)
+
+
+def test_public_playlist_without_login():
+    items = [embed_item(1), {"uri": "spotify:episode:xyz", "title": "Podcast", "subtitle": "", "duration": 1}]
+    name, tracks, total = public_collection(f"https://open.spotify.com/playlist/{PID}?si=abc",
+                                            transport=public_transport(embed_page("ÉTÉ 2K26", items)))
+    assert (name, total) == ("ÉTÉ 2K26", None)  # moins de 100 titres : liste complète
+    assert tracks == [{"id": f"{1:022d}", "artist": "Vacra, La Rvfleuze", "title": "Titre 1", "duration": 169.586,
+                       "url": f"https://open.spotify.com/track/{1:022d}", "isrc": None}]
+
+
+def test_public_playlist_truncated_at_100_reports_real_total():
+    html = embed_page("ÉTÉ 2K26", [embed_item(i) for i in range(100)])
+    _, tracks, total = public_collection(f"https://open.spotify.com/playlist/{PID}",
+                                         transport=public_transport(html, song_count=297))
+    assert (len(tracks), total) == (100, 297)
+
+
+@pytest.mark.parametrize("html, status, message", [
+    ("<html>pas de données</html>", 200, "format de la page Spotify inattendu"),
+    ("", 404, "introuvable"),
+])
+def test_public_playlist_errors_are_explicit(html, status, message):
+    with pytest.raises(SpotifyError, match=message):
+        public_collection(f"https://open.spotify.com/playlist/{PID}", transport=public_transport(html, status=status))

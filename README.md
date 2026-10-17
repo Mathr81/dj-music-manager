@@ -18,21 +18,27 @@ La base est dans `%APPDATA%\dj-music-manager\library.db`.
 
 ### Spotify
 
+Un lien de playlist ou d'album Spotify s'importe **sans connexion** : l'app lit la page d'intégration publique
+(lecteur « embed »), qui liste titre, artistes et durée des **100 premiers titres**. Au-delà, l'aperçu indique
+combien de titres manquent.
+
+Connexion facultative, pour tes playlists privées ou de plus de 100 titres :
+
 1. Crée une app sur [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) (Web API),
-   avec l'URI de redirection `http://127.0.0.1:8888/callback`.
+   avec l'URI de redirection `http://127.0.0.1:8888/callback`. Ton compte doit être Premium.
 2. Dans **Réglages**, colle son Client ID puis **Connecter Spotify** (connexion PKCE dans le navigateur ;
    le refresh token va dans le Gestionnaire d'identifiants Windows).
 
-Limites de l'API Spotify en mode développeur (février 2026) : le propriétaire de l'app doit être Premium, et
-seules les playlists **que tu possèdes ou co-édites** renvoient leurs pistes. Pour la playlist de quelqu'un
-d'autre, copie ses titres dans une playlist à toi. Les albums fonctionnent tous.
+Depuis février 2026, l'API officielle ne livre que les playlists **que tu possèdes ou co-édites**. Pour importer
+en entier la playlist de quelqu'un d'autre, copie ses titres dans une playlist à toi (Ctrl+A, « Ajouter à la
+playlist »). Les téléchargements, eux, passent toujours par `/download?url=` et n'ont pas besoin de Spotify.
 
 ## Modules
 
 | Module | Rôle |
 |---|---|
 | `api_client.py` | API de téléchargement ([docs/API.md](docs/API.md)) : streaming, timeout 150 s, 422 jamais réessayé, 504 une fois |
-| `spotify.py` | API Web Spotify : connexion PKCE, pistes d'album/playlist |
+| `spotify.py` | Spotify : API Web (connexion PKCE) ou page publique, pistes d'album/playlist |
 | `deezer.py` | API publique Deezer : ISRC, titre d'album/playlist (quota 50 req / 5 s) |
 | `dedup.py` | normalisation artiste + titre (feat., Original Mix, accents, casse, ponctuation) |
 | `library.py` | SQLite : schéma, migrations (`PRAGMA user_version`), requêtes |

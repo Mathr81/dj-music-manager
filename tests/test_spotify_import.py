@@ -11,6 +11,7 @@ from dj_music_manager.api_client import ApiClient
 from dj_music_manager.deezer import DeezerPublic
 from dj_music_manager.downloader import Downloader, closest
 from dj_music_manager.library import Library
+from dj_music_manager.spotify import NOT_OWNED, NotOwnedError
 
 URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
 SP_TRACKS = [
@@ -98,3 +99,26 @@ def test_closest():
     assert closest(results, 235)["id"] == "b"
     assert closest(results, None)["id"] == "a"
     assert closest([], 200) is None
+
+
+class NotMinePlaylist(FakeSpotify):
+    def collection(self, url):
+        raise NotOwnedError(NOT_OWNED)
+
+
+@pytest.mark.parametrize("spotify", [None, NotMinePlaylist()], ids=["sans connexion", "playlist d'un autre"])
+@pytest.mark.parametrize("total, warned", [(None, False), (3, False), (297, True)])
+def test_public_playlist_fallback(tmp_path, monkeypatch, spotify, total, warned):
+    lib = Library(tmp_path / "db")
+    lib.add_track({"path": "a.mp3", "artist": "Daft Punk", "title": "One More Time", "duration": 320.4,
+                   "source": "deezer"})
+    public = [{**t, "isrc": None} for t in SP_TRACKS]  # la page publique ne donne pas l'ISRC
+    monkeypatch.setattr(importer, "public_collection", lambda url: ("ÉTÉ 2K26", public, total))
+
+    p = importer.preview(None, None, lib, URL, spotify=spotify)
+
+    assert (p.provider, p.title, len(p.tracks)) == ("spotify", "ÉTÉ 2K26", 3)
+    assert set(p.existing) == {"sp1"}  # reconnue par artiste + titre ± 3 s
+    assert (p.warning is not None) is warned
+    if warned:
+        assert "294 autres" in p.warning

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from .api_client import ApiClient
 from .deezer import DeezerPublic
 from .library import Library
-from .spotify import Spotify, SpotifyError, is_spotify_link
+from .spotify import NotOwnedError, Spotify, is_spotify_link, public_collection
 
 
 def parse_duration(s: str | None) -> int | None:
@@ -42,20 +42,36 @@ class Preview:
     tracks: list[dict]  # id, artist, title, duration (s), url, isrc éventuel
     provider: str = "deezer"
     existing: dict[str, int] = field(default_factory=dict)  # ID source -> ID interne
+    warning: str | None = None  # ex. playlist Spotify publique tronquée à 100 titres
 
     @property
     def new(self) -> list[dict]:
         return [t for t in self.tracks if t["id"] not in self.existing]
 
 
+def _spotify_preview(url: str, spotify: Spotify | None) -> Preview:
+    """API officielle si connecté et autorisé, sinon page publique (100 premiers titres)."""
+    if spotify is not None:
+        try:
+            title, tracks = spotify.collection(url)
+            return Preview(url, title, tracks, "spotify")
+        except NotOwnedError:
+            pass  # playlist publique de quelqu'un d'autre
+    title, tracks, total = public_collection(url)
+    p = Preview(url, title, tracks, "spotify")
+    if total and total > len(tracks):
+        p.warning = (f"Spotify ne rend publics que les {len(tracks)} premiers titres de cette playlist "
+                     f"(sur {total}). Pour importer les {total - len(tracks)} autres, copie-les dans une playlist "
+                     "à toi (Ctrl+A, « Ajouter à la playlist ») et connecte Spotify dans les Réglages.")
+    return p
+
+
 def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_progress=None,
             spotify: Spotify | None = None) -> Preview:
     if is_spotify_link(url):
-        if spotify is None:
-            raise SpotifyError("Spotify n'est pas connecté : configure-le dans les Réglages")
-        title, tracks = spotify.collection(url)
-        p = Preview(url, title, tracks, "spotify")
-        isrc_lookup = lambda track_id: (spotify.track(track_id).get("external_ids") or {}).get("isrc")
+        p = _spotify_preview(url, spotify)
+        isrc_lookup = (lambda track_id: (spotify.track(track_id).get("external_ids") or {}).get("isrc")) \
+            if spotify else (lambda track_id: None)
     else:
         tracks = [{**t, "duration": parse_duration(t.get("duration"))} for t in api.tracks(url)]
         try:
