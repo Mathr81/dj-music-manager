@@ -48,7 +48,7 @@ class SettingsDialog(QDialog):
         self.key = QLineEdit(echoMode=QLineEdit.Password)
         self.key.setPlaceholderText("inchangée" if config.get_api_key() else "obligatoire")
         self.ffmpeg = QLineEdit(lib.get_setting("ffmpeg_dir", ""),
-                                placeholderText="vide = ffmpeg/ffprobe trouvés dans le PATH")
+                                placeholderText="vide = ffmpeg/ffprobe fournis avec l'app (ou ceux du PATH)")
         form = QFormLayout(self)
         form.addRow("Dossier RAW", raw_row)
         form.addRow("Qualité par défaut", self.quality)

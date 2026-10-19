@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -34,9 +35,15 @@ def set_spotify_token(token: str):
     keyring.set_password(SERVICE, "spotify_refresh_token", token)
 
 
+def bundled_ffmpeg_dir() -> Path | None:
+    """Dossier du ffmpeg embarqué dans le paquet PyInstaller (None hors paquet)."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    return Path(bundle) / "ffmpeg" if bundle else None
+
+
 def ffmpeg_tools(ffmpeg_dir: str | None) -> tuple[str, str]:
-    """(ffmpeg, ffprobe) : dossier des Réglages, sinon PATH."""
-    # shortcut: le ffmpeg embarqué à côté de l'exe arrive avec le paquet PyInstaller (étape 7)
+    """(ffmpeg, ffprobe) : dossier des Réglages, sinon celui embarqué dans l'app, sinon PATH."""
+    ffmpeg_dir = ffmpeg_dir or bundled_ffmpeg_dir()
     if ffmpeg_dir:
         tools = (str(Path(ffmpeg_dir) / "ffmpeg.exe"), str(Path(ffmpeg_dir) / "ffprobe.exe"))
     else:

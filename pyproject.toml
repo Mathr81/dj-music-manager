@@ -16,7 +16,10 @@ dependencies = [
 dj-music-manager = "dj_music_manager.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pyinstaller>=6.22.3",
+    "pytest>=8",
+]
 
 [build-system]
 requires = ["uv_build>=0.9,<0.10"]

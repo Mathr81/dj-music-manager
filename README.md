@@ -16,6 +16,19 @@ et éventuellement le dossier de ffmpeg/ffprobe (sinon ceux du PATH).
 La clé est stockée dans le Gestionnaire d'identifiants Windows, jamais dans le code ni la base.
 La base est dans `%APPDATA%\dj-music-manager\library.db`.
 
+### Paquet Windows (sans Python)
+
+```bash
+uv run pyinstaller packaging/dj-music-manager.spec --noconfirm
+```
+
+Produit `dist\dj-music-manager\` : copier le dossier entier où l'on veut et lancer `dj-music-manager.exe`.
+ffmpeg et ffprobe y sont embarqués (`_internalfmpeg`), pris dans le PATH au moment du build ou dans le dossier
+indiqué par la variable `FFMPEG_DIR`. Les données (base, journal, clé) restent dans `%APPDATA%` et le Gestionnaire
+d'identifiants : mettre à jour l'app = remplacer le dossier. Un dossier ffmpeg indiqué dans les Réglages reste
+prioritaire. Taille : ~600 Mo avec le build « full » de gyan.dev, dont ~430 Mo pour ffmpeg (le build
+« essentials » suffit et pèse bien moins). Ces builds sont sous GPL : à respecter si le dossier est redistribué.
+
 ### Spotify
 
 Un lien de playlist ou d'album Spotify s'importe **sans connexion** : l'app lit la page d'intégration publique
@@ -138,4 +151,4 @@ de rekordbox. Le rekordbox.xml produit est relu sans erreur par pyrekordbox.
 4. ~~Tags, playlists manuelles et intelligentes, filtres~~
 5. ~~Remplacement d'un son par une meilleure version (même ID interne)~~
 6. ~~Export rekordbox.xml (+ option FLAC → AIFF), Serato, VirtualDJ, Mixxx~~
-7. Paquet PyInstaller avec ffmpeg embarqué
+7. ~~Paquet PyInstaller avec ffmpeg embarqué~~
