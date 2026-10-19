@@ -71,6 +71,8 @@ MIGRATIONS = [
     """,
     # v2 : fichier déjà préparé par le bot (/collection), à récupérer par /file
     "ALTER TABLE jobs ADD COLUMN file TEXT;",
+    # titres Spotify déjà consultés (quota de l'API) ; shortcut: jamais expirés, les métadonnées bougent rarement
+    "CREATE TABLE spotify_cache(id TEXT PRIMARY KEY, data TEXT NOT NULL);",
 ]
 
 api_log = logging.getLogger("dj_music_manager.api")  # anomalies des données renvoyées par l'API
@@ -121,6 +123,15 @@ class Library:
         with self._tx() as db:
             db.execute("INSERT INTO settings VALUES(?, ?) ON CONFLICT DO UPDATE SET value = excluded.value",
                        (key, value))
+
+    def spotify_cached(self, track_id: str) -> dict | None:
+        row = self._one("SELECT data FROM spotify_cache WHERE id = ?", track_id)
+        return json.loads(row[0]) if row else None
+
+    def cache_spotify(self, track: dict):
+        with self._tx() as db:
+            db.execute("INSERT INTO spotify_cache VALUES(?, ?) ON CONFLICT DO UPDATE SET data = excluded.data",
+                       (track["id"], json.dumps(track)))
 
     # --- sons et dédoublonnage
     def track_by_external(self, provider: str, external_id: str) -> int | None:

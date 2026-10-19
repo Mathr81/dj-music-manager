@@ -166,14 +166,14 @@ class ImportDialog(QDialog):
 
 
 class SearchDialog(QDialog):
-    """Recherche manuelle d'une piste en échec ; self.chosen = résultat de /search retenu."""
+    """Recherche d'une piste (en échec, ou depuis la barre d'import) ; self.chosen = résultat de /search retenu."""
 
     def __init__(self, api: ApiClient, artist: str, title: str, expected: float | None, parent=None):
         super().__init__(parent)
         self.api = api
         self.chosen = None
-        self.setWindowTitle("Chercher à la main")
-        self.query = QLineEdit(f"{artist} {title}")
+        self.setWindowTitle("Chercher à la main" if expected is not None else "Rechercher")
+        self.query = QLineEdit(f"{artist} {title}".strip())
         self.query.returnPressed.connect(self._search)
         row = QHBoxLayout()
         row.addWidget(self.query)
@@ -182,7 +182,8 @@ class SearchDialog(QDialog):
         self.results.itemDoubleClicked.connect(self.accept)
         layout = QVBoxLayout(self)
         layout.addLayout(row)
-        layout.addWidget(QLabel(f"Durée attendue : {fmt_duration(expected) or 'inconnue'}"))
+        if expected is not None:
+            layout.addWidget(QLabel(f"Durée attendue : {fmt_duration(expected)}"))
         layout.addWidget(self.results)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Télécharger celle-ci")

@@ -405,3 +405,29 @@ if job["status"] == "error":
 ```bash
 curl -s -H "X-API-Key: $KEY" -OJ "$BASE/download?id=69879250&quality=mp3_320"
 ```
+
+## Récupérer une playlist complète (mise à jour du 19/10)
+
+1. Lancer la collecte avec `POST /collections?url=<playlist>&quality=…`, puis interroger `GET /collections/{id}`
+   toutes les 4 s environ jusqu'à ce que `status` vaille `done` ou `error`.
+2. Repli piste par piste dans deux cas :
+   - `status == "error"`, quel que soit le message (ex. le bot principal refuse les liens Spotify : « You've sent
+     many Spotify links recently… », et le bot de secours ne répond pas aux grosses playlists) ;
+   - `status == "done"` mais `len(tracks) < expected` : souvent une playlist de plus de 100 titres (le bot gratuit
+     n'envoie que les 100 premiers, `warning` contient son message).
+
+   Demander alors chaque titre manquant avec `GET /download?url=<lien Spotify de la piste>&quality=…`, à partir de
+   sa propre liste de titres. Repérer les manquants par titre, artiste et durée (±3 s), pas par nom de fichier
+   (le bot principal retire aussi les doublons de la playlist).
+3. Envoyer les `/download` un par un, ou 2 en parallèle au maximum : les bots traitent une demande à la fois, en
+   envoyer plus ne va pas plus vite et fait expirer les requêtes. Pas de `/download` pendant une collecte.
+4. Codes de réponse de `/download` :
+
+| Code | Que faire |
+|---|---|
+| `200` | fichier OK (`X-Bot` indique le bot qui l'a servi) |
+| `503` | attendre `Retry-After` secondes, puis réessayer |
+| `504` | réessayer une fois, un peu plus tard |
+| `422` | piste introuvable chez les bots (absente de Deezer, réservée aux donateurs…) : la marquer indisponible, sans la réessayer en boucle |
+
+5. Rien à gérer pour la limite Spotify sur les pistes seules : l'API convertit elle-même le lien Spotify en lien Deezer.

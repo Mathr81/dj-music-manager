@@ -5,7 +5,8 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from dj_music_manager.spotify import (NOT_OWNED, REDIRECT_URI, Spotify, SpotifyError, authorize, is_spotify_link,
+from dj_music_manager.spotify import (NOT_OWNED, REDIRECT_URI, RateLimitedError, Spotify, SpotifyError, authorize,
+                                      is_spotify_link,
                                       public_collection, public_track, track_ids_in)
 
 PID = "37i9dQZF1DXcBWIGoYBM5M"
@@ -157,3 +158,20 @@ def test_public_track():
     t = public_track("2x7ItKbPQXhqXad1SwVnwS", transport=httpx.MockTransport(lambda r: httpx.Response(200, text=html)))
     assert (t["artist"], t["title"], t["duration"], t["url"]) == (
         "Vacra, La Rvfleuze", "Fille à Papa", 169.586, "https://open.spotify.com/track/2x7ItKbPQXhqXad1SwVnwS")
+
+
+def test_quota_exceeded_blocks_further_calls():
+    calls = []
+
+    def handler(request):
+        if request.url.host == "accounts.spotify.com":
+            return httpx.Response(200, json={"access_token": "A", "expires_in": 3600})
+        calls.append(request.url.path)
+        return httpx.Response(429, headers={"retry-after": "78389"}, json={"error": {"message": "Too many requests"}})
+
+    s = Spotify("cid", "R1", transport=httpx.MockTransport(handler))
+    with pytest.raises(RateLimitedError, match="~22 h"):
+        s.track_info("5FpR9fuQCIeyMhZN6FUxU8")
+    with pytest.raises(RateLimitedError):
+        s.track_info("2dvChuAwfrlqZdJumaeATh")
+    assert len(calls) == 1  # bloqué : plus aucune requête vers l'API

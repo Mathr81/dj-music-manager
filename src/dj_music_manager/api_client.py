@@ -118,16 +118,19 @@ class ApiClient:
 
     def _retried(self, call):
         """422 : pas de nouvel essai (même réponse garantie) ; 504 : un seul nouvel essai ;
-        503 (tous les bots mis de côté) : un nouvel essai après le délai Retry-After."""
-        try:
-            return call()
-        except ApiError as e:
-            if e.status == 503:
-                if self._closed.wait(e.retry_after or 30):
+        503 (tous les bots mis de côté) : nouvel essai après le délai Retry-After, 3 fois au plus."""
+        retried_504 = False
+        for attempt in range(4):
+            try:
+                return call()
+            except ApiError as e:
+                if e.status == 503 and attempt < 3:
+                    if self._closed.wait(e.retry_after or 30):
+                        raise
+                elif e.status == 504 and not retried_504:
+                    retried_504 = True
+                else:
                     raise
-            elif e.status != 504:
-                raise
-        return call()
 
     def tracks(self, url: str) -> list[dict]:
         return self._get_json("/tracks", {"url": url})

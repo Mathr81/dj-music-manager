@@ -13,7 +13,7 @@ from ..api_client import ApiClient
 from ..deezer import DeezerPublic
 from ..downloader import Downloader
 from ..library import Library
-from ..spotify import Spotify, is_spotify_link, track_ids_in
+from ..spotify import Spotify, track_ids_in
 from .dialogs import ImportDialog, SearchDialog, SettingsDialog
 from .library_panel import LibraryPanel
 
@@ -53,7 +53,7 @@ class MainWindow(QMainWindow):
         self.bridge.manual_done.connect(self._on_manual_done)
         self.setAcceptDrops(True)
 
-        self.link = QLineEdit(placeholderText="Lien d'album ou de playlist Deezer ou Spotify")
+        self.link = QLineEdit(placeholderText="Lien Deezer ou Spotify (titre, album, playlist), ou recherche : artiste titre")
         self.link.returnPressed.connect(self._analyze)
         self.analyze_btn = QPushButton("Analyser", clicked=self._analyze)
         top = QHBoxLayout()
@@ -148,13 +148,20 @@ class MainWindow(QMainWindow):
         url = self.link.text().strip()
         if not url or not self._ensure_api():
             return
+        chosen = None
+        if not importer.is_link(url):  # texte libre : recherche, puis le titre choisi
+            dlg = SearchDialog(self.api, url, "", None, self)
+            if not dlg.exec():
+                return
+            chosen = dlg.chosen
         self.analyze_btn.setEnabled(False)
-        spotify = self._spotify_client() if is_spotify_link(url) else None
+        spotify = self._spotify_client()
 
         def work():
             try:
-                self.bridge.preview_done.emit(importer.preview(
-                    self.api, self.deezer, self.lib, url, self.bridge.preview_progress.emit, spotify))
+                p = importer.track_preview(self.deezer, self.lib, url, chosen, spotify) or importer.preview(
+                    self.api, self.deezer, self.lib, url, self.bridge.preview_progress.emit, spotify)
+                self.bridge.preview_done.emit(p)
             except Exception as e:
                 self.bridge.preview_failed.emit(str(e))
 
@@ -168,6 +175,16 @@ class MainWindow(QMainWindow):
     def _on_preview(self, p: importer.Preview):
         self.analyze_btn.setEnabled(True)
         self.statusBar().clearMessage()
+        if p.single:  # un titre : directement en file, qualité par défaut
+            self.link.clear()
+            if p.existing:
+                self.statusBar().showMessage(f"« {p.title} » est déjà dans la bibliothèque", 8000)
+                return
+            self.downloader.submit(importer.queue(
+                self.lib, p, self.lib.get_setting("default_quality", config.DEFAULT_QUALITY)))
+            self.statusBar().showMessage(f"« {p.title} » en file", 8000)
+            self.tabs.setCurrentWidget(self.queue_tab)
+            return
         dlg = ImportDialog(p, self.lib.get_setting("default_quality", config.DEFAULT_QUALITY), self)
         result = dlg.exec()
         if result == ImportDialog.PASTE:

@@ -1,4 +1,4 @@
-# Paquet Windows : uv run pyinstaller packaging/dj-music-manager.spec --noconfirm
+# Paquet Windows (appelé par packaging/build.py) : uv run pyinstaller packaging/dj-music-manager.spec --noconfirm
 # ffmpeg/ffprobe sont pris dans FFMPEG_DIR, sinon dans le PATH, et copiés dans _internal/ffmpeg.
 import os
 import shutil
@@ -13,11 +13,13 @@ for name in ("ffmpeg", "ffprobe"):
     tools.append((os.path.realpath(found), "ffmpeg"))  # realpath : les liens de WinGet sont des raccourcis
 
 root = Path(SPECPATH).parent
+icon = root / "src" / "dj_music_manager" / "icon.ico"
 a = Analysis(
     [str(root / "packaging" / "launch.py")],
     pathex=[str(root / "src")],
-    datas=tools,  # en données : pas d'analyse de dépendances sur ces exe autonomes
+    datas=tools + [(str(icon), "dj_music_manager")],  # ffmpeg en données : pas d'analyse de dépendances
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="dj-music-manager", console=False)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="dj-music-manager", console=False,
+          icon=str(icon))
 coll = COLLECT(exe, a.binaries, a.datas, name="dj-music-manager")

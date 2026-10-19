@@ -11,7 +11,7 @@ from dj_music_manager.api_client import ApiClient
 from dj_music_manager.deezer import DeezerPublic
 from dj_music_manager.downloader import Downloader, closest
 from dj_music_manager.library import Library
-from dj_music_manager.spotify import NOT_OWNED, NotOwnedError, SpotifyError
+from dj_music_manager.spotify import NOT_OWNED, NotOwnedError, RateLimitedError, SpotifyError
 
 URL = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
 SP_TRACKS = [
@@ -176,3 +176,40 @@ def test_pasted_list_errors(tmp_path, text, message):
                                           "url": link(sid("sp1")), "isrc": None}], "spotify", total=5)
     with pytest.raises(SpotifyError, match=message):
         importer.preview_pasted(base, text, Library(tmp_path / "db"))
+
+
+def test_pasted_list_falls_back_to_public_pages_when_quota_exceeded(tmp_path):
+    class Blocked(FakeSpotify):
+        def track_info(self, track_id):
+            raise RateLimitedError("Spotify : quota de l'API dépassé, réessaie dans ~22 h")
+
+        def track(self, track_id):
+            raise RateLimitedError("quota")
+
+    public = lambda t: {"id": t, "artist": "J9ueve, Zamdane", "title": "Sans toi", "duration": 163.9, "url": link(t),
+                        "isrc": None}
+    text = "\n".join(link(sid(i)) for i in ("a", "b"))
+    p = importer.preview_pasted(importer.Preview(URL, "Set", [], "spotify", total=2), text, Library(tmp_path / "db"),
+                                Blocked(), fetch_public=public)
+    assert len(p.tracks) == 2 and p.warning is None  # aucun titre compté « introuvable »
+
+
+def test_second_analysis_uses_the_cache(tmp_path):
+    lib = Library(tmp_path / "db")
+    calls = []
+
+    class LoggedIn(FakeSpotify):
+        def track_info(self, track_id):
+            calls.append(("info", track_id))
+            return {"id": track_id, "artist": "A", "title": track_id, "duration": 180.0, "url": link(track_id),
+                    "isrc": None}
+
+        def track(self, track_id):
+            calls.append(("isrc", track_id))
+            return {"external_ids": {}}
+
+    text = link(sid("x"))
+    for _ in range(2):
+        p = importer.preview_pasted(importer.Preview(URL, "Set", [], "spotify", total=1), text, lib, LoggedIn())
+        assert [t["title"] for t in p.tracks] == [sid("x")]
+    assert calls == [("info", sid("x")), ("isrc", sid("x"))]  # la 2e analyse ne demande plus rien à Spotify

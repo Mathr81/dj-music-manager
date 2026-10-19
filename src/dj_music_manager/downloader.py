@@ -12,7 +12,8 @@ from .library import Library
 from .quality.badge import badge
 from .tags import read_tags
 
-MAX_PARALLEL = 4  # au-delà, le débit Telegram (~6 Mo/s pour tout le compte) plafonne
+MAX_PARALLEL = 4  # fichiers déjà prêts (/file) : au-delà, le débit Telegram (~6 Mo/s) plafonne
+MAX_BOT_PARALLEL = 2  # /download : les bots traitent une demande à la fois, plus fait expirer les requêtes
 POLL_SECONDS = 4  # suivi d'une collecte (l'API conseille 3 à 5 s)
 COLLECTION_TIMEOUT = 1800  # s : au-delà, on cesse d'attendre une collecte qui ne finit pas
 
@@ -28,7 +29,10 @@ class Downloader:
         self.api = api
         self.lib = lib
         self.on_event = on_event or (lambda *a: None)
-        self._pool = ThreadPoolExecutor(MAX_PARALLEL)
+        self._pool = ThreadPoolExecutor(MAX_PARALLEL)  # fichiers préparés par une collecte
+        self._bot_pool = ThreadPoolExecutor(MAX_BOT_PARALLEL)  # demandes au bot (/download)
+        self._collections = 0  # collectes en cours : aucun /download pendant ce temps (consigne de l'API)
+        self._idle = threading.Condition()
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._cancelled: set[int] = set()
@@ -56,17 +60,22 @@ class Downloader:
         for job in sorted(jobs, key=lambda j: j["quality"]):
             self.lib.update_job(job["id"], status="queued", error=None, http_status=None)
             self.on_event("status", job["id"], None)
-            self._pool.submit(self._run, job["id"])
+            (self._pool if job["file"] else self._bot_pool).submit(self._run, job["id"])
 
     def close(self, wait: bool = False):
         """wait=True : termine la file ; sinon annule ce qui reste et interrompt les téléchargements."""
         if not wait:
             self._stop.set()
-        self._pool.shutdown(wait=wait, cancel_futures=not wait)
+        for pool in (self._pool, self._bot_pool):
+            pool.shutdown(wait=wait, cancel_futures=not wait)
 
     def _run(self, job_id: int):
-        while self._paused.is_set() and not self._stop.is_set() and job_id not in self._cancelled:
-            time.sleep(0.3)
+        job = self.lib.job(job_id)
+        asks_bot = job is not None and not job["file"]
+        with self._idle:
+            while ((self._paused.is_set() or (asks_bot and self._collections))
+                   and not self._stop.is_set() and job_id not in self._cancelled):
+                self._idle.wait(0.3)
         if self._stop.is_set() or job_id in self._cancelled:
             return
         job = self.lib.job(job_id)
@@ -173,6 +182,16 @@ class Downloader:
         return thread
 
     def _collect(self, p, quality: str, job_ids: list[int]):
+        with self._idle:
+            self._collections += 1
+        try:
+            self._collect_files(p, quality, job_ids)
+        finally:
+            with self._idle:
+                self._collections -= 1
+                self._idle.notify_all()
+
+    def _collect_files(self, p, quality: str, job_ids: list[int]):
         jobs_by_track = {self.lib.job(j)["external_id"]: j for j in job_ids}
         remaining = list(p.tracks)  # pistes attendues sans fichier
         served: list[dict] = []  # pistes attendues déjà rapprochées d'un fichier

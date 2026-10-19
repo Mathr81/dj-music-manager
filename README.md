@@ -16,18 +16,24 @@ et éventuellement le dossier de ffmpeg/ffprobe (sinon ceux du PATH).
 La clé est stockée dans le Gestionnaire d'identifiants Windows, jamais dans le code ni la base.
 La base est dans `%APPDATA%\dj-music-manager\library.db`.
 
-### Paquet Windows (sans Python)
+### Installateur Windows
 
 ```bash
-uv run pyinstaller packaging/dj-music-manager.spec --noconfirm
+uv run python packaging/build.py
 ```
 
-Produit `dist\dj-music-manager\` : copier le dossier entier où l'on veut et lancer `dj-music-manager.exe`.
-ffmpeg et ffprobe y sont embarqués (`_internal\ffmpeg`), pris dans le PATH au moment du build ou dans le dossier
-indiqué par la variable `FFMPEG_DIR`. Les données (base, journal, clé) restent dans `%APPDATA%` et le Gestionnaire
-d'identifiants : mettre à jour l'app = remplacer le dossier. Un dossier ffmpeg indiqué dans les Réglages reste
-prioritaire. Taille : ~600 Mo avec le build « full » de gyan.dev, dont ~430 Mo pour ffmpeg (le build
-« essentials » suffit et pèse bien moins). Ces builds sont sous GPL : à respecter si le dossier est redistribué.
+Produit `dist\DJ-Music-Manager-<version>-setup.exe` : installation pour l'utilisateur courant, sans droits
+administrateur, raccourci dans le menu Démarrer (et sur le bureau en option), désinstallation depuis les Paramètres
+Windows. Réinstaller par-dessus met l'app à jour. La bibliothèque (`%APPDATA%\dj-music-manager`) et la clé API
+(Gestionnaire d'identifiants) ne sont jamais touchées, même à la désinstallation.
+
+Le script télécharge une fois le ffmpeg « essentials » de [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) dans
+`build\ffmpeg` (empreinte SHA-256 vérifiée) et l'embarque dans l'app (`_internal\ffmpeg`), puis lance PyInstaller
+(`packaging/dj-music-manager.spec`, dossier autonome `dist\dj-music-manager\`) et Inno Setup 6
+(`packaging/installer.iss`). Un dossier ffmpeg indiqué dans les Réglages reste prioritaire. ffmpeg est sous GPL :
+à respecter si l'installateur est redistribué.
+
+L'icône (`src/dj_music_manager/icon.ico`) est dessinée par `packaging/make_icon.py`.
 
 ### Spotify
 
@@ -50,17 +56,27 @@ Depuis février 2026, l'API officielle d'une app en mode développeur ne livre l
 possèdes ou co-édites**, même connectée : c'est ce qui rend la copie depuis l'app nécessaire pour les autres.
 Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin de Spotify.
 
+Le quota de l'API Spotify d'une app en mode développeur est vite atteint (Spotify répond alors « 429 » avec une
+attente qui peut dépasser 20 h) : l'app bascule d'elle-même sur les pages publiques jusqu'à la fin du blocage.
+Les titres déjà consultés sont gardés dans la base : réanalyser une playlist ne redemande rien à Spotify.
+
+### Un titre seul
+
+La barre d'import accepte aussi un lien de titre Spotify ou Deezer (`https://open.spotify.com/intl-fr/track/…`),
+ou du texte libre (« qu'on s'attache ») : une recherche s'ouvre, le titre choisi part en file dans la qualité
+par défaut. Un titre déjà dans la bibliothèque n'est pas retéléchargé.
+
 ## Modules
 
 | Module | Rôle |
 |---|---|
-| `api_client.py` | API de téléchargement ([docs/API.md](docs/API.md)) : streaming, timeout 150 s, 422 jamais réessayé, 504 une fois, 503 après `Retry-After` |
+| `api_client.py` | API de téléchargement ([docs/API.md](docs/API.md)) : streaming, timeout 150 s, 422 jamais réessayé, 504 une fois, 503 après `Retry-After` (3 fois au plus) |
 | `spotify.py` | Spotify : API Web (connexion PKCE) ou page publique, pistes d'album/playlist |
 | `deezer.py` | API publique Deezer : ISRC, titre d'album/playlist (quota 50 req / 5 s) |
 | `dedup.py` | normalisation artiste + titre (feat., Original Mix, accents, casse, ponctuation) |
 | `library.py` | SQLite : schéma, migrations (`PRAGMA user_version`), requêtes |
 | `importer.py` | aperçu dédoublonné d'un lien, création des jobs |
-| `downloader.py` | 4 téléchargements simultanés, échecs isolés et relançables |
+| `downloader.py` | 4 fichiers de collecte (`/file`) et 2 demandes au bot (`/download`) en parallèle, aucun `/download` pendant une collecte ; échecs isolés et relançables |
 | `manual.py` | ajout manuel (glisser-déposer, scan) et remplacement d'un son : même dédoublonnage, copie dans RAW |
 | `files.py` | écriture dans RAW sans jamais écraser |
 | `tags.py` | lecture des tags (jamais d'écriture) |

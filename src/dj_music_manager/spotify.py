@@ -38,6 +38,10 @@ class SpotifyError(Exception):
     pass
 
 
+class RateLimitedError(SpotifyError):
+    """Quota de l'API officielle dépassé (429 avec une longue attente) : les pages publiques prennent le relais."""
+
+
 class NotOwnedError(SpotifyError):
     """L'API officielle ne livre pas le contenu de cette playlist (pas à l'utilisateur connecté)."""
 
@@ -163,6 +167,7 @@ class Spotify:
         self._http = httpx.Client(base_url=API, timeout=20, transport=transport)
         self._access = None
         self._expires = 0.0
+        self._blocked_until = 0.0  # quota dépassé : plus aucune requête avant cette heure
 
     def _token(self) -> str:
         if time.monotonic() >= self._expires - 60:
@@ -180,10 +185,17 @@ class Spotify:
 
     def _get(self, url: str, params: dict | None = None) -> dict:
         for _ in range(3):
+            left = self._blocked_until - time.monotonic()
+            if left > 0:
+                raise RateLimitedError(f"Spotify : quota de l'API dépassé, réessaie dans "
+                                       f"{f'~{left / 3600:.0f} h' if left >= 3600 else f'~{left / 60 + 1:.0f} min'}")
             r = self._http.get(url, params=params, headers={"Authorization": f"Bearer {self._token()}"})
             wait = int(r.headers.get("retry-after", "1"))
-            if r.status_code == 429 and wait <= 30:
-                time.sleep(wait)
+            if r.status_code == 429:
+                if wait > 30:
+                    self._blocked_until = time.monotonic() + wait
+                else:
+                    time.sleep(wait)
                 continue
             if r.status_code != 200:
                 try:
@@ -192,7 +204,7 @@ class Spotify:
                     message = r.text[:200]
                 raise SpotifyError(f"Spotify {r.status_code} : {message}")
             return r.json()
-        raise SpotifyError("Spotify : trop de requêtes, réessaie plus tard")
+        raise RateLimitedError("Spotify : trop de requêtes, réessaie plus tard")
 
     def track(self, track_id: str) -> dict:
         return self._get(f"/tracks/{track_id}")

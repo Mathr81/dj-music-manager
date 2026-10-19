@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QLibraryInfo, QTranslator
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from . import config
@@ -13,6 +14,7 @@ from .ui.main_window import MainWindow
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DJ Music Manager")
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.ico"))))
     translator = QTranslator(app)  # boutons standard Qt en français (OK/Annuler…)
     if translator.load("qtbase_fr", QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
         app.installTranslator(translator)

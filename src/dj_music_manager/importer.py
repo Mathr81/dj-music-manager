@@ -1,5 +1,6 @@
-"""Import d'un album/playlist Deezer ou Spotify : aperçu dédoublonné, puis création des jobs de téléchargement."""
+"""Import d'un album/playlist ou d'un titre Deezer ou Spotify : aperçu dédoublonné, puis création des jobs."""
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -9,8 +10,10 @@ from .api_client import ApiClient
 from .deezer import COLLECTION_RE, DeezerPublic
 from .dedup import norm_key, same_duration
 from .library import Library
-from .spotify import (LINK_RE, NotOwnedError, Spotify, SpotifyError, is_spotify_link, public_collection,
-                      public_track, track_ids_in)
+from .spotify import (LINK_RE, TRACK_LINK_RE, NotOwnedError, RateLimitedError, Spotify, SpotifyError, is_spotify_link,
+                      public_collection, public_track, track_ids_in)
+
+DEEZER_TRACK_RE = re.compile(r"deezer\.com/(?:[a-z]{2}/)?track/(\d+)")
 
 PASTE_HINT = ("Dans l'app Spotify : ouvre la playlist, Ctrl+A puis Ctrl+C, "
               "puis clique sur « Coller la liste complète ».")
@@ -61,6 +64,7 @@ class Preview:
     existing: dict[str, int] = field(default_factory=dict)  # ID source -> ID interne
     warning: str | None = None  # ex. playlist Spotify publique tronquée à 100 titres
     total: int | None = None  # vrai nombre de titres quand la liste est tronquée
+    single: bool = False  # un titre seul : pas de playlist
 
     @property
     def new(self) -> list[dict]:
@@ -73,8 +77,8 @@ def _spotify_preview(url: str, spotify: Spotify | None) -> Preview:
         try:
             title, tracks = spotify.collection(url)
             return Preview(url, title, tracks, "spotify")
-        except NotOwnedError:
-            pass  # playlist publique de quelqu'un d'autre
+        except (NotOwnedError, RateLimitedError):
+            pass  # playlist publique de quelqu'un d'autre, ou quota de l'API dépassé
     title, tracks, total = public_collection(url)
     p = Preview(url, title, tracks, "spotify")
     if total and total > len(tracks):
@@ -85,10 +89,34 @@ def _spotify_preview(url: str, spotify: Spotify | None) -> Preview:
     return p
 
 
-def _isrc_lookup(spotify: Spotify | None):
+def _spotify_track(spotify: Spotify | None, track_id: str, lib: Library, fetch_public=None) -> dict:
+    """Cache, puis API officielle si connecté (ISRC compris), page publique sinon ou si le quota est dépassé."""
+    hit = lib.spotify_cached(track_id)
+    if hit and "title" in hit:  # sinon entrée partielle (ISRC seul)
+        return hit
+    t = None
+    if spotify is not None:
+        try:
+            t = spotify.track_info(track_id)
+        except RateLimitedError:
+            pass
+    t = t or (fetch_public or public_track)(track_id)
+    lib.cache_spotify({**t, "isrc": t.get("isrc") or (hit or {}).get("isrc")})
+    return t
+
+
+def _isrc_lookup(spotify: Spotify | None, lib: Library):
     if spotify is None:
         return lambda track_id: None  # sans connexion : artiste + titre ± 3 s, puis ISRC des tags au téléchargement
-    return lambda track_id: (spotify.track(track_id).get("external_ids") or {}).get("isrc")
+
+    def lookup(track_id):
+        hit = lib.spotify_cached(track_id) or {"id": track_id}
+        if hit.get("isrc") is not None:  # "" : déjà demandé, Spotify n'en a pas
+            return hit["isrc"] or None
+        isrc = (spotify.track(track_id).get("external_ids") or {}).get("isrc")
+        lib.cache_spotify({**hit, "isrc": isrc or ""})
+        return isrc
+    return lookup
 
 
 def _dedup(p: Preview, lib: Library, isrc_lookup, on_progress) -> Preview:
@@ -111,12 +139,11 @@ def preview_pasted(base: Preview, text: str, lib: Library, spotify: Spotify | No
     known = {t["id"]: t for t in base.tracks}
     if known and not known.keys() & set(ids):
         raise SpotifyError("Les titres copiés ne correspondent pas à cette playlist : as-tu copié la bonne ?")
-    fetch = spotify.track_info if spotify else fetch_public
     missing = [i for i in ids if i not in known]
 
     def get(track_id):
         try:
-            return fetch(track_id)
+            return _spotify_track(spotify, track_id, lib, fetch_public)
         except (SpotifyError, httpx.HTTPError):
             return None  # titre retiré de Spotify : on l'ignore plutôt que d'abandonner tout le collage
 
@@ -136,7 +163,7 @@ def preview_pasted(base: Preview, text: str, lib: Library, spotify: Spotify | No
         warnings.append(f"{len(ids)} titres collés sur {base.total} : tous les titres étaient-ils sélectionnés "
                         "(Ctrl+A) dans Spotify ?")
     p.warning = " ".join(warnings) or None
-    return _dedup(p, lib, _isrc_lookup(spotify), None)
+    return _dedup(p, lib, _isrc_lookup(spotify, lib), None)
 
 
 def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_progress=None,
@@ -144,8 +171,7 @@ def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_pro
     url = canonical_source(url)  # sinon chaque lien de partage créerait une nouvelle playlist
     if is_spotify_link(url):
         p = _spotify_preview(url, spotify)
-        isrc_lookup = (lambda track_id: (spotify.track(track_id).get("external_ids") or {}).get("isrc")) \
-            if spotify else (lambda track_id: None)
+        isrc_lookup = _isrc_lookup(spotify, lib)
     else:
         tracks = [{**t, "duration": parse_duration(t.get("duration"))} for t in api.tracks(url)]
         try:
@@ -155,6 +181,33 @@ def preview(api: ApiClient, deezer: DeezerPublic, lib: Library, url: str, on_pro
         p = Preview(url, title, tracks)
         isrc_lookup = lambda track_id: deezer.track(track_id).get("isrc")
     return _dedup(p, lib, isrc_lookup, on_progress)
+
+
+def is_link(text: str) -> bool:
+    """Lien (ou URI Spotify) plutôt qu'une recherche « artiste titre »."""
+    return "://" in text or re.search(r"spotify\.com/|deezer\.com/|^spotify:", text) is not None
+
+
+def track_preview(deezer: DeezerPublic, lib: Library, link: str | None = None, chosen: dict | None = None,
+                  spotify: Spotify | None = None) -> Preview | None:
+    """Un titre seul : lien de piste Spotify ou Deezer, ou résultat de /search choisi.
+    None si le lien n'est pas un lien de piste."""
+    if chosen is not None:
+        t = {**chosen, "duration": parse_duration(chosen.get("duration")), "isrc": None}
+        provider = "deezer"
+    elif m := TRACK_LINK_RE.search(link):
+        t = _spotify_track(spotify, m[1], lib)
+        provider = "spotify"
+    elif m := DEEZER_TRACK_RE.search(link):
+        d = deezer.track(m[1])
+        t = {"id": str(d["id"]), "artist": d["artist"]["name"], "title": d["title"], "duration": float(d["duration"]),
+             "url": f"https://www.deezer.com/track/{d['id']}", "isrc": d.get("isrc")}
+        provider = "deezer"
+    else:
+        return None
+    p = Preview(t["url"], f"{t['artist']} – {t['title']}", [t], provider, single=True)
+    isrc_lookup = _isrc_lookup(spotify, lib) if provider == "spotify" else lambda i: deezer.track(i).get("isrc")
+    return _dedup(p, lib, isrc_lookup, None)
 
 
 def match_collection(entries: list[dict], tracks: list[dict]) -> tuple[dict[str, dict], list[dict]]:
@@ -180,10 +233,12 @@ def match_collection(entries: list[dict], tracks: list[dict]) -> tuple[dict[str,
 
 def queue(lib: Library, p: Preview, quality: str) -> list[int]:
     """Crée/maj la playlist (références, jamais de copie) et renvoie les ID des jobs à lancer."""
-    playlist_id = lib.playlist_for_source(p.url, p.title)
-    lib.set_playlist_tracks(playlist_id, [(p.existing[t["id"]], i) for i, t in enumerate(p.tracks)
-                                          if t["id"] in p.existing])
-    lib.drop_failed_jobs(playlist_id)
+    playlist_id = None
+    if not p.single:
+        playlist_id = lib.playlist_for_source(p.url, p.title)
+        lib.set_playlist_tracks(playlist_id, [(p.existing[t["id"]], i) for i, t in enumerate(p.tracks)
+                                              if t["id"] in p.existing])
+        lib.drop_failed_jobs(playlist_id)
     return lib.add_jobs([
         {"playlist_id": playlist_id, "position": i, "provider": p.provider, "external_id": t["id"], "url": t["url"],
          "artist": t["artist"], "title": t["title"], "expected_duration": t["duration"], "quality": quality}
