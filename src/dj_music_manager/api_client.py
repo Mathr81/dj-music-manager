@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from .files import reserve
 QUALITIES = ("flac", "mp3_320", "mp3_128")
 FILE_PATH_RE = re.compile(r"^/file/[A-Za-z0-9_.-]+/\d+$")
 COLLECTION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MAX_RETRY_AFTER = 1800  # s : l'API met un bot de côté 30 min au plus
 # journal des erreurs de l'API (fichier configuré au démarrage de l'app) : sert à corriger et améliorer l'API
 log = logging.getLogger("dj_music_manager.api")
 
@@ -25,10 +27,19 @@ def describe(path: str, params: dict) -> str:
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, retry_after: float | None = None):
         super().__init__(f"{status} : {message}")
         self.status = status
         self.message = message
+        self.retry_after = retry_after  # 503 : délai demandé par l'API (en-tête Retry-After)
+
+
+def http_error(resp: httpx.Response) -> ApiError:
+    try:
+        retry_after = min(float(resp.headers["retry-after"]), MAX_RETRY_AFTER)
+    except (KeyError, ValueError):
+        retry_after = None
+    return ApiError(resp.status_code, error_message(resp), retry_after)
 
 
 @dataclass
@@ -76,8 +87,10 @@ class ApiClient:
         self._http = httpx.Client(
             base_url=base_url, headers={"X-API-Key": api_key}, timeout=150, transport=transport
         )
+        self._closed = threading.Event()  # interrompt l'attente d'un 503
 
     def close(self):
+        self._closed.set()
         self._http.close()
 
     @staticmethod
@@ -99,17 +112,20 @@ class ApiClient:
         def call():
             r = self._http.request(method, path, params=params)
             if r.status_code not in (200, 202):
-                raise ApiError(r.status_code, error_message(r))
+                raise http_error(r)
             return r.json()
         return self._logged(f"{method} {path}" if method != "GET" else path, params, call)
 
-    @staticmethod
-    def _retry_504(call):
-        """422 : pas de nouvel essai (même réponse garantie) ; 504 : un seul nouvel essai."""
+    def _retried(self, call):
+        """422 : pas de nouvel essai (même réponse garantie) ; 504 : un seul nouvel essai ;
+        503 (tous les bots mis de côté) : un nouvel essai après le délai Retry-After."""
         try:
             return call()
         except ApiError as e:
-            if e.status != 504:
+            if e.status == 503:
+                if self._closed.wait(e.retry_after or 30):
+                    raise
+            elif e.status != 504:
                 raise
         return call()
 
@@ -122,7 +138,7 @@ class ApiClient:
     def start_collection(self, url: str, quality: str) -> dict:
         """Lance la collecte d'un album/playlist par le bot (réponse immédiate, status « running »).
         Suivre avec collection_status() ; une piste que le bot ne trouve pas est simplement absente."""
-        return self._checked(self._retry_504(
+        return self._checked(self._retried(
             lambda: self._get_json("/collections", {"url": url, "quality": quality}, method="POST")))
 
     def collection_status(self, collection_id: str) -> dict:
@@ -146,21 +162,21 @@ class ApiClient:
         """Télécharge une piste dans dest_dir."""
         params = {"id": id} if id else {"url": url}
         params["quality"] = quality
-        return self._retry_504(lambda: self._logged(
+        return self._retried(lambda: self._logged(
             "/download", params, lambda: self._stream_to(Path(dest_dir), "/download", params, on_progress)))
 
     def file(self, dest_dir: Path, path: str, on_progress=None) -> Download:
         """Télécharge un fichier listé par collection()."""
         if not FILE_PATH_RE.match(path):  # chemin fourni par le serveur : jamais d'URL vers un autre hôte
             raise ApiError(0, f"chemin de fichier invalide : {path!r}")
-        return self._retry_504(lambda: self._logged(
+        return self._retried(lambda: self._logged(
             path, {}, lambda: self._stream_to(Path(dest_dir), path, {}, on_progress)))
 
     def _stream_to(self, dest_dir: Path, path: str, params: dict, on_progress) -> Download:
         with self._http.stream("GET", path, params=params) as r:
             if r.status_code != 200:
                 r.read()
-                raise ApiError(r.status_code, error_message(r))
+                raise http_error(r)
             final, f = reserve(dest_dir, filename(r.headers.get("content-disposition", "")))
             part = Path(f.name)
             total = int(r.headers.get("content-length") or 0)

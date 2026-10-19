@@ -80,10 +80,8 @@ def _spotify_preview(url: str, spotify: Spotify | None) -> Preview:
     if total and total > len(tracks):
         p.total = total
         p.warning = (f"Spotify ne rend publics que les {len(tracks)} premiers titres de cette playlist "
-                     f"(sur {total}). Au téléchargement, le bot récupère la playlist entière : les "
-                     f"{total - len(tracks)} autres seront ajoutés s'ils ne sont pas déjà dans la bibliothèque "
-                     "(vérifié par artiste, titre et durée). Pour les voir avant : " + PASTE_HINT[0].lower()
-                     + PASTE_HINT[1:])
+                     f"(sur {total}), et le bot n'en télécharge pas plus de 100 par playlist. Pour avoir les "
+                     f"{total - len(tracks)} autres : " + PASTE_HINT[0].lower() + PASTE_HINT[1:])
     return p
 
 

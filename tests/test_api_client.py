@@ -64,6 +64,24 @@ def test_504_then_success(tmp_path):
     assert client(lambda r: next(responses)).download(tmp_path, "flac", id="1").path.exists()
 
 
+def test_503_retried_after_retry_after(tmp_path, monkeypatch):
+    responses = iter([httpx.Response(503, headers={"retry-after": "120"}, json={"detail": "bots mis de côté"}),
+                      httpx.Response(200, headers=AUDIO_HEADERS, content=b"a")])
+    api = client(lambda r: next(responses))
+    waits = []
+    monkeypatch.setattr(api._closed, "wait", lambda s: waits.append(s) or False)
+    assert api.download(tmp_path, "flac", id="1").path.exists()
+    assert waits == [120.0]
+
+
+def test_503_wait_interrupted_by_close(tmp_path):
+    api = client(lambda r: httpx.Response(503, headers={"retry-after": "999"}, json={"detail": "bots mis de côté"}))
+    api._closed.set()  # app fermée pendant l'attente : pas de nouvel essai
+    with pytest.raises(ApiError) as e:
+        api.download(tmp_path, "flac", id="1")
+    assert (e.value.status, e.value.retry_after) == (503, 999.0)
+
+
 def test_validation_detail_is_a_list(tmp_path):
     body = {"detail": [{"type": "string_pattern_mismatch", "loc": ["query", "id"], "msg": "String should match"}]}
     with pytest.raises(ApiError) as e:

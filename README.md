@@ -21,11 +21,10 @@ La base est dans `%APPDATA%\dj-music-manager\library.db`.
 Un lien de playlist ou d'album Spotify s'importe **sans connexion** : l'app lit la page d'intégration publique
 (lecteur « embed »), qui liste titre, artistes et durée des **100 premiers titres**.
 
-**Playlist de plus de 100 titres** : rien à faire, au téléchargement le bot récupère la playlist entière
-(`/collection`) et les titres au-delà des 100 sont ajoutés s'ils ne sont pas déjà dans la bibliothèque (artiste,
-titre et durée). Pour voir la liste complète **avant** de télécharger : dans l'app Spotify, ouvre la playlist,
-**Ctrl+A puis Ctrl+C**, puis clique sur **Coller la liste complète** dans l'aperçu (pages publiques des morceaux,
-~1 min 20 pour 200 titres ; quelques secondes si Spotify est connecté).
+**Playlist de plus de 100 titres** : ni la page publique ni le bot (compte gratuit) ne vont au-delà de 100.
+Pour avoir le reste : dans l'app Spotify, ouvre la playlist, **Ctrl+A puis Ctrl+C**, puis clique sur
+**Coller la liste complète** dans l'aperçu (pages publiques des morceaux, ~1 min 20 pour 200 titres ; quelques
+secondes si Spotify est connecté). Au téléchargement, le bot fournit les 100 premiers, la suite passe piste par piste.
 
 Connexion facultative (titres plus rapides avec ISRC, playlists privées) :
 
@@ -42,7 +41,7 @@ Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin 
 
 | Module | Rôle |
 |---|---|
-| `api_client.py` | API de téléchargement ([docs/API.md](docs/API.md)) : streaming, timeout 150 s, 422 jamais réessayé, 504 une fois |
+| `api_client.py` | API de téléchargement ([docs/API.md](docs/API.md)) : streaming, timeout 150 s, 422 jamais réessayé, 504 une fois, 503 après `Retry-After` |
 | `spotify.py` | Spotify : API Web (connexion PKCE) ou page publique, pistes d'album/playlist |
 | `deezer.py` | API publique Deezer : ISRC, titre d'album/playlist (quota 50 req / 5 s) |
 | `dedup.py` | normalisation artiste + titre (feat., Original Mix, accents, casse, ponctuation) |

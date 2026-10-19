@@ -96,6 +96,8 @@ chacun avec `GET <file>` (voir `/file`).
   "status": "done",
   "error": null,
   "bot": "DeezerMusicBot",
+  "expected": 45,
+  "warning": null,
   "tracks": [
     {"file": "/file/DeezerMusicBot/4625", "artist": "Daft Punk", "title": "Lose Yourself to Dance",
      "duration": "5:53", "size": 14213781, "mime": "audio/mpeg"}
@@ -104,7 +106,12 @@ chacun avec `GET <file>` (voir `/file`).
 ```
 
 - Ordre de l'album/playlist. Le bot principal retire les doublons, pas le bot de secours.
-- Une piste introuvable chez le bot est simplement absente : comparer avec la liste attendue si besoin.
+- Une piste introuvable chez le bot est simplement absente. `expected` donne le nombre de pistes de
+  l'album/playlist (Spotify ou Deezer ; `null` si inconnu) : `len(tracks) < expected` = pistes manquantes.
+  Le bot principal retire les doublons, donc `len(tracks)` peut être inférieur sans qu'il manque rien.
+- **Playlist de plus de 100 titres** : le bot principal (compte gratuit) ne traite que les 100 premiers.
+  La collecte se termine `done` avec ces 100 titres, `expected` = taille réelle et `warning` = message du bot.
+  Les titres suivants sont à demander un par un avec `/download` (le bot de secours ne répond pas aux grosses playlists).
 - Durée : 10 à 35 s pour 45 pistes, plus 60 s de silence à la fin quand une piste manque chez le bot de secours.
   Pendant ce temps, les autres requêtes vers le même bot attendent.
 - Erreurs : comme `/download` (`422` refus du bot, `504` bot muet).
@@ -202,11 +209,13 @@ Toujours du JSON avec un champ `detail`.
 | `422` | le bot refuse (piste introuvable, réservée Premium/donation, option de qualité invalide) | **chaîne** : message du bot, ex. `"Track not found or unavailable.\nDebugID: 123"` |
 | `422` | validation FastAPI (paramètre trop long, `id` non numérique, `value` non entier…) | **tableau** d'objets `{loc, msg, type}` |
 | `502` | `/tracks` : API Deezer injoignable | chaîne |
+| `503` | tous les bots sont temporairement mis de côté (muets ou bloqués) ; en-tête `Retry-After` (s) | chaîne |
 | `504` | le bot n'a pas répondu à temps | chaîne |
 | `500` | erreur interne | — |
 
 Attention : `detail` est une chaîne **ou** un tableau selon l'origine du `422`. Tester le type.
-Ne pas réessayer automatiquement un `422` du bot (même réponse garantie) ; un `504` peut être réessayé une fois.
+Ne pas réessayer automatiquement un `422` du bot (même réponse garantie) ; un `504` peut être réessayé une fois ;
+un `503` doit être réessayé après `Retry-After` secondes.
 
 ## Comportement à connaître
 
@@ -233,6 +242,14 @@ Ne pas réessayer automatiquement un `422` du bot (même réponse garantie) ; un
 - Ne pas dépasser ~4 téléchargements simultanés : le débit Telegram est plafonné à ~6 Mo/s pour tout le compte,
   au-delà ça ne va pas plus vite.
 
+**Fichier vérifié avant d'être servi**
+
+Les bots ne répondent pas en « reply » : rien ne relie une réponse à sa demande. Un fichier en retard (fin
+d'une playlist, requête expirée) peut donc arriver pendant une autre requête. Pour les liens de piste Spotify et
+Deezer (et `id=`), l'API compare le titre et la durée (±10 s) du fichier reçu avec ceux de la piste demandée,
+et écarte tout fichier qui ne correspond pas. Pour les autres liens, pas de vérification : contrôler
+`artist`/`title` côté client.
+
 **Bot principal en panne**
 
 Le bot principal peut se bloquer plusieurs minutes, par exemple après une rafale de fichiers, ou sur un
@@ -240,7 +257,9 @@ téléchargement qui ne finit pas. Il répond alors « Please wait for the curre
 La première requête qui le constate attend son timeout (~25 à 90 s) et passe au bot de secours. Le bot principal
 est ensuite mis de côté 2 min (puis 4, 8… jusqu'à 30 min s'il reste muet) : les requêtes vont directement au
 secours (`X-Bot: DeezerMusicBot`, MP3 320 seulement, `quality` ignoré). `/search` bascule alors sur l'API Deezer
-(mêmes résultats). Aucune action à faire côté client.
+(mêmes résultats). Si tous les bots sont mis de côté : `503` + `Retry-After`.
+Pendant une collecte, le bot principal est occupé : les `/download` envoyés en même temps attendent leur tour
+(jusqu'à ~1 min 30 pour 100 titres). Mieux vaut ne pas les lancer en parallèle d'une collecte.
 
 **Qualité : utiliser `quality` sur `/download`, pas `PUT /quality`**
 

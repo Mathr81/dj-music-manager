@@ -236,12 +236,17 @@ class Downloader:
                 log.warning("collecte %s (%s) | status error | %s", state.get("id"), p.url, state.get("error"))
         except Exception as e:  # erreur déjà journalisée par le client API si elle vient de l'API
             self.on_event("collection", 0, f"Collecte interrompue ({e}) : le reste passe piste par piste.")
-        if remaining and state:
+        # playlist de plus de 100 titres : le bot ne traite que les 100 premiers (warning), la suite n'est pas un bug
+        capped = {t["id"] for t in p.tracks[100:]} if state.get("warning") else set()
+        missing = [t for t in remaining if t["id"] not in capped]
+        if missing and state:
             log.warning("collecte %s (%s) | %d piste(s) attendue(s) sur %d absente(s) (%d fichier(s) reçu(s)) : %s",
-                        state.get("id"), p.url, len(remaining), len(p.tracks), len(seen_files),
-                        "; ".join(f"{t['artist']} – {t['title']}" for t in remaining[:30]))
+                        state.get("id"), p.url, len(missing), len(p.tracks) - len(capped), len(seen_files),
+                        "; ".join(f"{t['artist']} – {t['title']}" for t in missing[:30]))
         rest = [j for j in job_ids if j not in submitted]
         message = f"Bot : {len(submitted)} piste(s) par la collecte"
+        if state.get("warning"):
+            message += f" ({state['warning']})"
         if added:
             message += f", {len(added)} titre(s) en plus de l'aperçu"
         if rest:
