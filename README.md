@@ -23,7 +23,7 @@ uv run pyinstaller packaging/dj-music-manager.spec --noconfirm
 ```
 
 Produit `dist\dj-music-manager\` : copier le dossier entier où l'on veut et lancer `dj-music-manager.exe`.
-ffmpeg et ffprobe y sont embarqués (`_internalfmpeg`), pris dans le PATH au moment du build ou dans le dossier
+ffmpeg et ffprobe y sont embarqués (`_internal\ffmpeg`), pris dans le PATH au moment du build ou dans le dossier
 indiqué par la variable `FFMPEG_DIR`. Les données (base, journal, clé) restent dans `%APPDATA%` et le Gestionnaire
 d'identifiants : mettre à jour l'app = remplacer le dossier. Un dossier ffmpeg indiqué dans les Réglages reste
 prioritaire. Taille : ~600 Mo avec le build « full » de gyan.dev, dont ~430 Mo pour ffmpeg (le build
