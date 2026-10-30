@@ -224,7 +224,11 @@ class Spotify:
         if not m:
             raise SpotifyError(f"lien Spotify non reconnu : {url}")
         kind, sid = m[1], m[2]
-        meta = self._get(f"/{kind}s/{sid}")
+        try:
+            meta = self._get(f"/{kind}s/{sid}")
+        except SpotifyError as e:
+            # playlists éditoriales et algorithmiques (37i9dQZF…) : 404 pour les apps en mode développeur
+            raise NotOwnedError(NOT_OWNED) if kind == "playlist" and " 404 " in str(e) else e
         if kind == "playlist":
             if "items" not in meta and "tracks" not in meta:
                 raise NotOwnedError(NOT_OWNED)

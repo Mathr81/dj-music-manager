@@ -71,6 +71,11 @@ def test_playlist_not_owned_explains_the_limit():
     with pytest.raises(SpotifyError) as e:
         s.collection(f"https://open.spotify.com/playlist/{PID}")
     assert str(e.value) == NOT_OWNED
+    # playlist éditoriale Spotify : l'API répond 404, l'import retombe sur la page publique
+    s = spotify_client({f"/v1/playlists/{PID}": (404, {"error": {"status": 404, "message": "Resource not found"}})}, [])
+    with pytest.raises(SpotifyError) as e:
+        s.collection(f"https://open.spotify.com/playlist/{PID}")
+    assert str(e.value) == NOT_OWNED
 
 
 def test_album_tracks():
