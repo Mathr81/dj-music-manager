@@ -20,6 +20,7 @@ from ..spotify import Spotify, track_ids_in
 from .dialogs import ImportDialog, SearchDialog, SettingsDialog, plural
 from .icons import icon
 from .library_panel import MIME_IDS, LibraryPanel, reveal, search_menu
+from .player import PlayerBar
 
 STATUS = {"queued": "En attente", "running": "En cours", "done": "Terminé", "failed": "Échec"}
 STATUS_COLORS = {"queued": "#8b91a0", "running": "#34c3ff", "done": "#5fd068", "failed": "#ff6b6b"}
@@ -35,7 +36,9 @@ SHORTCUTS = """\
 <tr><td><b>Ctrl+1 / 2 / 3</b></td><td>Bibliothèque / File d'attente / Échecs</td></tr>
 <tr><td><b>Ctrl+P</b></td><td>Pause / reprise des téléchargements</td></tr>
 <tr><td><b>Ctrl+,</b></td><td>Réglages</td></tr>
-<tr><td><b>Entrée, double-clic</b></td><td>Lire le son</td></tr>
+<tr><td><b>Entrée, double-clic</b></td><td>Écouter le son</td></tr>
+<tr><td><b>Espace</b></td><td>Lecture / pause</td></tr>
+<tr><td><b>Ctrl+→ / Ctrl+←</b></td><td>Son suivant / précédent</td></tr>
 <tr><td><b>Ctrl+C</b></td><td>Copier « Artiste – Titre »</td></tr>
 <tr><td><b>Ctrl+T</b></td><td>Ajouter des tags</td></tr>
 <tr><td><b>Suppr</b></td><td>Retirer de la playlist (dans « Toute la bibliothèque » : supprimer)</td></tr>
@@ -99,10 +102,21 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.queue_tab, icon("download"), "File d'attente")
         self.tabs.addTab(self._failures_tab(), icon("alert"), "Échecs")
 
+        self.player = PlayerBar()
+        self.panel.player = self.player
+        self.player.next_requested.connect(lambda: self.panel.play_step(1))
+        self.player.previous_requested.connect(lambda: self.panel.play_step(-1))
+
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addLayout(top)
-        layout.addWidget(self.tabs)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        body = QVBoxLayout()
+        body.setContentsMargins(9, 9, 9, 9)
+        body.addLayout(top)
+        body.addWidget(self.tabs)
+        layout.addLayout(body, 1)
+        layout.addWidget(self.player)
         self.setCentralWidget(central)
 
         self._job_rows: dict[int, int] = {}
@@ -137,6 +151,16 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("Nouvelle playlist…", "Ctrl+N", lambda: self.panel.new_playlist()).setIcon(icon("plus"))
         m.addAction("Nouvelle playlist intelligente…", "Ctrl+Shift+N", self.panel.new_smart).setIcon(icon("smart"))
+
+        m.addSeparator()
+        m.addAction(icon("activity"), "Calculer les BPM manquants",
+                    lambda: self.panel.detect_bpm([t["id"] for t in self.lib.tracks()]))
+
+        m = bar.addMenu("&Lecture")
+        m.addAction("Lecture / pause", "Space", self.player.toggle).setIcon(icon("play"))
+        m.addAction("Suivant", "Ctrl+Right", lambda: self.panel.play_step(1)).setIcon(icon("skip-forward"))
+        m.addAction("Précédent", "Ctrl+Left", lambda: self.panel.play_step(-1)).setIcon(icon("skip-back"))
+        m.addAction("Arrêter", self.player.stop)
 
         m = bar.addMenu("&Affichage")
         for i, name in enumerate(("Bibliothèque", "File d'attente", "Échecs"), 1):
@@ -584,6 +608,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         QSettings().setValue("window/geometry", self.saveGeometry())
         self.panel.save_state()
+        self.panel.close_workers()
+        self.player.stop()
         if self.downloader:
             self.downloader.close()
             self.api.close()  # coupe les téléchargements en cours ; ils seront relançables au prochain démarrage

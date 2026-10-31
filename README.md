@@ -81,12 +81,13 @@ par défaut. Un titre déjà dans la bibliothèque n'est pas retéléchargé.
 | `downloader.py` | 4 fichiers de collecte (`/file`) et 2 demandes au bot (`/download`) en parallèle, aucun `/download` pendant une collecte ; échecs isolés et relançables |
 | `manual.py` | ajout manuel (glisser-déposer, scan) et remplacement d'un son : même dédoublonnage, copie dans RAW |
 | `files.py` | écriture dans RAW sans jamais écraser |
-| `tags.py` | lecture des tags (jamais d'écriture) |
+| `tags.py` | lecture des tags et de la pochette (jamais d'écriture) |
+| `bpm.py` | détection du BPM (numpy) |
 | `smart.py` | règles des playlists intelligentes -> SQL paramétré |
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
 | `export.py` | export rekordbox.xml, crates Serato, M3U8, conversion FLAC → AIFF |
 | `quality/badge.py` | badge unique 128 / 192 / 256 / 320 / Lossless / Faux FLAC / Transcode |
-| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags ; `theme.py` : thème sombre ; `icons.py` : icônes vectorielles Lucide, licence ISC) |
+| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags ; `theme.py` : thème sombre ; `icons.py` : icônes vectorielles Lucide, licence ISC ; `player.py` : lecteur intégré) |
 
 Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titre normalisés ± 3 s.
 Jamais par nom de fichier.
@@ -129,6 +130,23 @@ et largeur de la colonne des playlists sont mémorisées. **F1** liste les racco
   l'erreur, chercher sur le web, afficher le fichier. Menu *Téléchargements* : relancer tous les échecs, retirer les
   terminés. La barre des tâches clignote quand tout est téléchargé.
 - La barre du bas donne le nombre de sons et la durée affichés (et ceux de la sélection).
+- **Lecteur intégré** en bas de la fenêtre : double-clic ou Entrée sur un son, **Espace** lecture/pause,
+  **Ctrl+→ / Ctrl+←** suivant/précédent dans la liste affichée (triée et filtrée), barre de position, volume
+  mémorisé. Enchaîne tout seul au son suivant.
+- **Pochettes** : lues dans les fichiers (ID3, FLAC, MP4), en arrière-plan, affichées à côté du titre et dans le
+  lecteur.
+- Tri alphabétique insensible aux accents et à la casse (« Été » avec les E), listes de sons et playlists.
+
+## BPM
+
+Le BPM vient du tag du fichier s'il existe ; sinon il est **calculé** (`bpm.py` : extrait de 60 s au milieu du
+morceau, enveloppe d'attaques et autocorrélation en numpy, sans dépendance de plus). Le calcul tourne en
+arrière-plan au démarrage pour les sons sans BPM et à chaque nouveau son ; il est gardé dans la base, jamais écrit
+dans le fichier, et part dans les exports (rekordbox, Serato).
+
+Sur 104 sons tagués de la bibliothèque : 89 à ±1 BPM, 13 à la moitié/au double (trap, reggaeton : convention de
+tempo), 2 faux. Clic droit → **BPM** : doubler, diviser par 2, saisir, recalculer. Menu *Bibliothèque* →
+*Calculer les BPM manquants*.
 
 ## Analyse qualité locale
 

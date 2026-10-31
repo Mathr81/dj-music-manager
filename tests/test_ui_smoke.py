@@ -38,7 +38,7 @@ def window(tmp_path, monkeypatch):
 def test_menus_and_stats(window):
     w, lib, _ = window
     menus = [a.text() for a in w.menuBar().actions()]
-    assert menus == ["&Fichier", "&Bibliothèque", "&Affichage", "&Téléchargements", "&Aide"]
+    assert menus == ["&Fichier", "&Bibliothèque", "&Lecture", "&Affichage", "&Téléchargements", "&Aide"]
     assert w.panel.stats.text().startswith("3 sons")
     w.panel.search.setText("introuvable")
     assert w.panel.proxy.rowCount() == 0 and "(sur 3)" in w.panel.stats.text()
@@ -70,3 +70,34 @@ def test_delete_tracks_sends_files_to_trash(window, monkeypatch):
     assert w.panel.proxy.rowCount() == 2
     remaining = {w.panel.model.item(r, 0).data(ID_ROLE): r for r in range(w.panel.model.rowCount())}
     assert w.panel._rows == remaining
+
+
+def test_accents_sort_with_plain_letters(window):
+    w, lib, _ = window
+    for name in ("Zouk", "Été", "Eau", "ébène"):
+        lib.create_playlist(name)
+    assert [p["name"] for p in lib.playlists()] == ["Eau", "ébène", "Été", "Zouk"]
+    lib.add_track({"path": "x.mp3", "artist": "Édith Piaf", "title": "T", "source": "manual"})
+    w.panel.show_track(lib.track_by_path("x.mp3"))
+    w.panel.view.sortByColumn(1, Qt.AscendingOrder)
+    artists = [w.panel.proxy.index(r, 1).data() for r in range(w.panel.proxy.rowCount())]
+    assert artists == ["Artiste 0", "Artiste 1", "Artiste 2", "Édith Piaf"]
+
+
+def test_bpm_double_half_and_player_steps(window):
+    w, lib, raw = window
+    ids = [w.panel.proxy.index(r, 0).data(ID_ROLE) for r in range(3)]
+    w.panel.set_bpm(ids[:1], 64)
+    w.panel.set_bpm(ids[:1], lambda b: b and b * 2)
+    assert lib.track(ids[0])["bpm"] == 128
+    w.panel.set_bpm(ids[1:2], lambda b: b and b / 2)  # sans BPM : inchangé
+    assert lib.track(ids[1])["bpm"] is None
+
+    played = []
+    w.panel.player.play = lambda path, artist, title, cover: played.append(title)
+    w.panel.view.selectRow(0)
+    w.panel.play_step(1)  # rien en lecture : la sélection
+    w.panel.play_step(1)
+    w.panel.play_step(-1)
+    first, second = (w.panel.proxy.index(r, 2).data() for r in (0, 1))
+    assert played == [first, second, first]

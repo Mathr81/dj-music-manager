@@ -74,6 +74,16 @@ QGroupBox {{ border: 1px solid {BORDER}; border-radius: 6px; margin-top: 16px; p
 QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: {MUTED}; font-weight: bold; }}
 QLabel#warning {{ color: {WARN}; }}
 QLabel#hint {{ color: {MUTED}; font-size: 9pt; }}
+QWidget#player {{ background: {PANEL}; border-top: 1px solid {BORDER}; }}
+QLabel#cover {{ background: {FIELD}; border-radius: 4px; }}
+QLabel#playerTitle {{ font-weight: bold; }}
+QPushButton#playButton {{ background: {ACCENT}; border: none; border-radius: 19px; min-width: 38px; max-width: 38px;
+    min-height: 38px; max-height: 38px; padding: 0; }}
+QPushButton#playButton:hover {{ background: #6dd5ff; }}
+QSlider::groove:horizontal {{ height: 4px; background: {BORDER}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {TEXT}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
+QSlider::handle:horizontal:hover {{ background: {ACCENT}; }}
 """
 
 

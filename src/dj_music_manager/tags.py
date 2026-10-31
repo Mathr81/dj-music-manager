@@ -36,3 +36,18 @@ def read_tags(path: Path) -> dict:
         "duration": f.info.length,
         "format": Path(path).suffix.lstrip(".").lower(),
     }
+
+
+def cover(path: Path) -> bytes | None:
+    """Pochette intégrée au fichier (ID3 APIC, image FLAC, covr MP4), sinon None."""
+    f = mutagen.File(path)
+    if f is None:
+        return None
+    if getattr(f, "pictures", None):  # FLAC
+        return f.pictures[0].data
+    tags = f.tags or {}
+    if isinstance(tags, ID3):
+        pics = tags.getall("APIC")
+        return pics[0].data if pics else None
+    covr = tags.get("covr") if hasattr(tags, "get") else None
+    return bytes(covr[0]) if covr else None

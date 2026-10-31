@@ -4,21 +4,24 @@ import json
 import os
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import quote_plus
 
 from PySide6.QtCore import (QByteArray, QItemSelectionModel, QMimeData, QObject, QSettings, QSize,
                             QSortFilterProxyModel, Qt, QUrl, Signal)
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPixmap, QKeySequence, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
 from send2trash import send2trash
 
-from .. import config, export, manual
+from .. import bpm, config, export, manual
+from ..dedup import norm_text
 from ..library import Library
 from ..quality.badge import BADGES
+from ..tags import cover
 from .dialogs import fmt_duration, plural
 from .export_dialog import HOW_TO, ExportDialog
 from .icons import icon
@@ -54,13 +57,6 @@ def reveal(path: Path):
         os.startfile(path.parent)
 
 
-def play(path: Path, parent=None):
-    if path.exists():
-        os.startfile(path)  # lecteur par défaut de Windows
-    else:
-        QMessageBox.warning(parent, "Lecture", f"Fichier introuvable :\n{path}")
-
-
 def web_search(site: str, query: str):
     QDesktopServices.openUrl(QUrl(SEARCH_SITES[site].format(quote_plus(query))))
 
@@ -75,7 +71,7 @@ def search_menu(menu: QMenu, query: str) -> QMenu:
 def _item(text, sort=None) -> QStandardItem:
     item = QStandardItem("" if text is None else str(text))
     item.setEditable(False)
-    item.setData(sort if sort is not None else item.text().casefold(), SORT_ROLE)
+    item.setData(sort if sort is not None else norm_text(item.text()), SORT_ROLE)  # « É » trié avec les E
     return item
 
 
@@ -176,6 +172,9 @@ class _Signals(QObject):
     replaced = Signal(int, str)  # ID du son, message d'erreur (vide si réussi)
     export_progress = Signal(int, int)
     exported = Signal(object, str)  # résultat de export.run, message d'erreur
+    cover_loaded = Signal(int, bytes)
+    bpm_found = Signal(int, float)
+    bpm_done = Signal(int)
 
 
 class LibraryPanel(QWidget):
@@ -189,6 +188,14 @@ class LibraryPanel(QWidget):
         self._signals.export_progress.connect(
             lambda n, total: self.window().statusBar().showMessage(f"Conversion en AIFF : {n}/{total}…"))
         self._signals.exported.connect(self._on_exported)
+        self._signals.cover_loaded.connect(self._on_cover)
+        self._signals.bpm_found.connect(self._on_bpm)
+        self._signals.bpm_done.connect(self._on_bpm_done)
+        self._covers: dict[int, QPixmap] = {}
+        self._bpm_pool = ThreadPoolExecutor(2)  # décodage ffmpeg + numpy : 2 en parallèle suffisent
+        self._bpm_pending: set[int] = set()
+        self.player = None  # PlayerBar, fourni par la fenêtre principale
+        self._playing: int | None = None
         self._rows: dict[int, int] = {}  # ID interne -> ligne du modèle source
         self._shown = -1  # playlist affichée (None = toute la bibliothèque)
 
@@ -256,7 +263,8 @@ class LibraryPanel(QWidget):
         self.view.setDragDropMode(QAbstractItemView.DragOnly)
         self.view.setDragEnabled(True)
         self.view.verticalHeader().hide()
-        self.view.verticalHeader().setDefaultSectionSize(30)
+        self.view.verticalHeader().setDefaultSectionSize(36)
+        self.view.setIconSize(QSize(28, 28))
         header = self.view.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setSectionResizeMode(QHeaderView.Interactive)
@@ -302,6 +310,8 @@ class LibraryPanel(QWidget):
         self.refresh_tags()
         self.refresh_playlists()
         self._restore_state()
+        self._load_covers([t["id"] for t in lib.tracks()])
+        self.detect_bpm([t["id"] for t in lib.tracks() if not t["bpm"]])
 
     @staticmethod
     def _shortcut(widget: QWidget, keys, slot) -> QAction:
@@ -317,6 +327,9 @@ class LibraryPanel(QWidget):
             self.view.horizontalHeader().restoreState(s.value("library/header"))
         if s.value("library/splitter") is not None:
             self.splitter.restoreState(s.value("library/splitter"))
+
+    def close_workers(self):
+        self._bpm_pool.shutdown(wait=False, cancel_futures=True)
 
     def save_state(self):
         s = QSettings()
@@ -338,8 +351,91 @@ class LibraryPanel(QWidget):
     def show_track(self, track_id: int):
         """Affiche un son arrivé dans la bibliothèque (téléchargé ou ajouté à la main)."""
         if track_id not in self._rows:
-            self._set_row(self.lib.track(track_id), [])
+            t = self.lib.track(track_id)
+            self._set_row(t, [])
+            self._load_covers([track_id])
+            if not t["bpm"]:
+                self.detect_bpm([track_id])
         self.refresh_playlists()  # compteurs et contenu de la playlist affichée
+
+    # --- pochettes (lues dans les fichiers, en arrière-plan)
+    def _load_covers(self, ids: list[int]):
+        raw = Path(self.lib.get_setting("raw_dir", ""))
+        paths = [(i, raw / t["path"]) for i in ids if (t := self.lib.track(i))]
+
+        def work():
+            for track_id, path in paths:
+                try:
+                    data = cover(path)
+                except Exception:
+                    data = None  # fichier absent ou illisible : pas de pochette
+                if data:
+                    self._signals.cover_loaded.emit(track_id, data)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_cover(self, track_id: int, data: bytes):
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        self._covers[track_id] = pixmap.scaled(128, 128, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        row = self._rows.get(track_id)
+        if row is not None:
+            self.model.item(row, COL_TITLE).setIcon(QIcon(self._covers[track_id]))
+
+    # --- BPM : calculés quand le fichier n'en a pas (jamais écrits dans le fichier)
+    def detect_bpm(self, ids: list[int], force: bool = False):
+        try:
+            ffmpeg, _ = config.ffmpeg_tools(self.lib.get_setting("ffmpeg_dir"))
+        except FileNotFoundError:
+            return
+        raw = Path(self.lib.get_setting("raw_dir", ""))
+        for track_id in ids:
+            t = self.lib.track(track_id)
+            if t is None or track_id in self._bpm_pending or (t["bpm"] and not force):
+                continue
+            self._bpm_pending.add(track_id)
+            self._bpm_pool.submit(self._detect_one, track_id, raw / t["path"], ffmpeg, t["duration"])
+        self._update_stats()
+
+    def _detect_one(self, track_id: int, path: Path, ffmpeg: str, duration):
+        try:
+            found = bpm.detect(path, ffmpeg, duration)
+            if found:
+                self._signals.bpm_found.emit(track_id, found)
+        except Exception:
+            pass  # shortcut: un échec n'est retenté qu'au prochain démarrage ; à mémoriser si ça devient gênant
+        finally:
+            self._signals.bpm_done.emit(track_id)
+
+    def _on_bpm(self, track_id: int, value: float):
+        self.set_bpm([track_id], value, refresh=False)
+
+    def _on_bpm_done(self, track_id: int):
+        self._bpm_pending.discard(track_id)
+        if not self._bpm_pending:
+            self.refresh_current()  # les playlists intelligentes sur le BPM se mettent à jour
+        self._update_stats()
+
+    def set_bpm(self, ids: list[int], value, refresh: bool = True):
+        """value : un nombre, ou une fonction de l'ancien BPM (×2, ÷2)."""
+        for track_id in ids:
+            t = self.lib.track(track_id)
+            new = t and (value(t["bpm"]) if callable(value) else value)
+            if not new:
+                continue
+            self.lib.update_track(track_id, {"bpm": round(new, 2)})
+            row = self._rows.get(track_id)
+            if row is not None:
+                self.model.setItem(row, COL_BPM, _item(f"{new:.0f}", new))
+        if refresh:
+            self.refresh_current()
+
+    def _ask_bpm(self, ids: list[int]):
+        current = self.lib.track(ids[0])["bpm"] or 120
+        value, ok = QInputDialog.getDouble(self, "BPM", "BPM :", current, 40, 250, 2)
+        if ok:
+            self.set_bpm(ids, value)
 
     def _set_row(self, t, tags: list[str]):
         """Ajoute la ligne du son, ou la remplace si elle existe déjà."""
@@ -359,8 +455,11 @@ class LibraryPanel(QWidget):
         first = _item("", 0)
         first.setData(t["id"], ID_ROLE)
         first.setData(t["path"], PATH_ROLE)
+        title = _item(t["title"])
+        if t["id"] in self._covers:
+            title.setIcon(QIcon(self._covers[t["id"]]))
         items = [
-            first, _item(t["artist"]), _item(t["title"]), quality, duration,
+            first, _item(t["artist"]), title, quality, duration,
             _item(f"{t['bpm']:.0f}" if t["bpm"] else "", t["bpm"] or 0), self._tags_item(tags),
             _item(t["format"]), _item(t["album"]), _item(t["added_at"].replace("T", " "), t["added_at"]),
         ]
@@ -401,6 +500,8 @@ class LibraryPanel(QWidget):
         text = f"{plural(n, 'son')} · {total(range(n))}"
         if n != self.model.rowCount():
             text += f"   (sur {self.model.rowCount()})"
+        if self._bpm_pending:
+            text += f"   —   calcul des BPM : {len(self._bpm_pending)} restant(s)"
         selected = self._selected_rows()
         if len(selected) > 1:
             text += f"   —   {plural(len(selected), 'sélectionné')} · {total(selected)}"
@@ -566,7 +667,7 @@ class LibraryPanel(QWidget):
             return
         rows = self._selected_rows()
         menu = QMenu(self)
-        menu.addAction(icon("play"), "Lire\tEntrée", self._play_selected)
+        menu.addAction(icon("play"), "Écouter\tEntrée", self._play_selected)
         menu.addAction(icon("folder"), "Afficher dans l'Explorateur", lambda: reveal(self._path(rows[0])))
         copy = menu.addMenu(icon("copy"), "Copier")
         copy.addAction("« Artiste – Titre »\tCtrl+C", lambda: self._copy(self._names()))
@@ -598,6 +699,11 @@ class LibraryPanel(QWidget):
         if current is not None and current["kind"] == "manual":
             menu.addAction(icon("list-minus"), f"Retirer de « {current['name']} »\tSuppr",
                            lambda: self._remove_from(current["id"], ids))
+        tempo = menu.addMenu(icon("activity"), "BPM")
+        tempo.addAction("Doubler (× 2)", lambda: self.set_bpm(ids, lambda b: b and b * 2))
+        tempo.addAction("Diviser par 2 (÷ 2)", lambda: self.set_bpm(ids, lambda b: b and b / 2))
+        tempo.addAction("Saisir…", lambda: self._ask_bpm(ids))
+        tempo.addAction("Recalculer", lambda: self.detect_bpm(ids, force=True))
         menu.addSeparator()
         if len(ids) == 1:
             menu.addAction(icon("replace"), "Remplacer le fichier…", lambda: self._replace(ids[0]))
@@ -614,10 +720,31 @@ class LibraryPanel(QWidget):
         data.setUrls([QUrl.fromLocalFile(str(self._path(r))) for r in rows])
         QApplication.clipboard().setMimeData(data)
 
+    # --- lecture dans le lecteur intégré
     def _play_selected(self):
         rows = self._selected_rows()
         if rows:
-            play(self._path(rows[0]), self)
+            self._play_row(rows[0])
+
+    def _play_row(self, row: int):
+        if self.player is None or not 0 <= row < self.proxy.rowCount():
+            return
+        path = self._path(row)
+        if not path.exists():
+            QMessageBox.warning(self, "Lecture", f"Fichier introuvable :\n{path}")
+            return
+        self._playing = self.proxy.index(row, 0).data(ID_ROLE)
+        self.view.selectRow(row)
+        self.player.play(path, self.proxy.index(row, COL_ARTIST).data(), self.proxy.index(row, COL_TITLE).data(),
+                         self._covers.get(self._playing))
+
+    def play_step(self, step: int):
+        """Son suivant (1) ou précédent (-1) dans la liste affichée, triée et filtrée ; sinon la sélection."""
+        rows = [r for r in range(self.proxy.rowCount()) if self.proxy.index(r, 0).data(ID_ROLE) == self._playing]
+        if rows:
+            self._play_row(rows[0] + step)
+        else:
+            self._play_row((self._selected_rows() or [0])[0])
 
     def _delete_key(self):
         ids = self._selected_ids()

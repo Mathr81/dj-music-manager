@@ -253,7 +253,7 @@ class Library:
         return merged
 
     def playlists(self) -> list[sqlite3.Row]:
-        return self._all("SELECT * FROM playlists ORDER BY name COLLATE NOCASE")
+        return sorted(self._all("SELECT * FROM playlists"), key=lambda p: norm_text(p["name"]))  # « Été » avec les E
 
     def playlist(self, playlist_id: int) -> sqlite3.Row | None:
         return self._one("SELECT * FROM playlists WHERE id = ?", playlist_id)
