@@ -42,7 +42,7 @@ class ExportDialog(QDialog):
         self.setWindowTitle("Exporter pour logiciel DJ")
         raw_parent = Path(lib.get_setting("raw_dir", ".")).parent
 
-        self.playlists = QListWidget()
+        self.playlists = QListWidget(minimumHeight=160)
         for p in lib.playlists():
             item = QListWidgetItem(p["name"])
             item.setData(Qt.UserRole, p["id"])
@@ -62,7 +62,7 @@ class ExportDialog(QDialog):
         self.aiff_dir = QLineEdit(lib.get_setting("aiff_dir") or str(raw_parent / "RAW_AIFF"))
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Playlists à exporter :"))
+        layout.addWidget(QLabel("PLAYLISTS À EXPORTER", objectName="heading"))
         layout.addWidget(self.playlists)
         layout.addWidget(formats_box)
         layout.addWidget(QLabel("Dossier d'export (rekordbox.xml, M3U8) :"))
@@ -72,10 +72,11 @@ class ExportDialog(QDialog):
         layout.addLayout(_folder_row(self.aiff_dir, self))
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Exporter")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.resize(520, 560)
+        self.resize(600, 640)
 
     def playlist_ids(self) -> list[int]:
         items = (self.playlists.item(i) for i in range(self.playlists.count()))

@@ -86,7 +86,7 @@ par défaut. Un titre déjà dans la bibliothèque n'est pas retéléchargé.
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
 | `export.py` | export rekordbox.xml, crates Serato, M3U8, conversion FLAC → AIFF |
 | `quality/badge.py` | badge unique 128 / 192 / 256 / 320 / Lossless / Faux FLAC / Transcode |
-| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags ; `theme.py` : thème sombre) |
+| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags ; `theme.py` : thème sombre ; `icons.py` : icônes vectorielles Lucide, licence ISC) |
 
 Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titre normalisés ± 3 s.
 Jamais par nom de fichier.

@@ -49,12 +49,13 @@ class SettingsDialog(QDialog):
         self.key.setPlaceholderText("inchangée" if config.get_api_key() else "obligatoire")
         self.ffmpeg = QLineEdit(lib.get_setting("ffmpeg_dir", ""),
                                 placeholderText="vide = ffmpeg/ffprobe fournis avec l'app (ou ceux du PATH)")
+        self.setMinimumWidth(640)
         form = QFormLayout(self)
         form.addRow("Dossier RAW", raw_row)
         form.addRow("Qualité par défaut", self.quality)
         form.addRow("URL de l'API", self.api_url)
         form.addRow("Clé API", self.key)
-        form.addRow(QLabel("La clé est stockée dans le Gestionnaire d'identifiants Windows."))
+        form.addRow("", QLabel("Stockée dans le Gestionnaire d'identifiants Windows.", objectName="hint"))
         self.spotify_id = QLineEdit(lib.get_setting("spotify_client_id", ""))
         self.connect_btn = QPushButton("Connecter Spotify", clicked=self._connect_spotify)
         self.spotify_status = QLabel("Connecté" if config.get_spotify_token() else "Non connecté")
@@ -69,9 +70,12 @@ class SettingsDialog(QDialog):
             "<a href='https://developer.spotify.com/dashboard'>developer.spotify.com</a> (Web API) avec l'URI "
             f"de redirection <code>{spotify.REDIRECT_URI}</code> ; ton compte doit être Premium.",
             openExternalLinks=True, wordWrap=True)
-        form.addRow(help_label)
+        help_label.setObjectName("hint")
+        form.addRow("", help_label)
         form.addRow("Dossier ffmpeg", self.ffmpeg)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -144,9 +148,7 @@ class ImportDialog(QDialog):
             f"<b>{preview.title}</b> : {plural(len(preview.tracks), 'piste')}<br>"
             f"{len(preview.existing)} déjà dans la bibliothèque, <b>{plural(n_new, 'nouvelle')}</b>"))
         if preview.warning:
-            warning = QLabel(f"⚠ {preview.warning}", wordWrap=True, maximumWidth=480)
-            warning.setStyleSheet("color: #ef6c00")
-            layout.addWidget(warning)
+            layout.addWidget(QLabel(preview.warning, wordWrap=True, maximumWidth=480, objectName="warning"))
         if preview.total:  # liste tronquée : la copie depuis l'app Spotify donne tous les titres
             layout.addWidget(QPushButton(f"Coller la liste complète ({preview.total} titres)…",
                                          clicked=lambda: self.done(self.PASTE)))
@@ -160,6 +162,7 @@ class ImportDialog(QDialog):
         if preview.total:
             label += f" + les {preview.total - len(preview.tracks)} autres"
         buttons.button(QDialogButtonBox.Ok).setText(label)
+        buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -187,6 +190,7 @@ class SearchDialog(QDialog):
         layout.addWidget(self.results)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Télécharger celle-ci")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

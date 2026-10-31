@@ -4,7 +4,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 BG, PANEL, FIELD, BORDER = "#15171c", "#1d2027", "#252932", "#323744"
-TEXT, MUTED, ACCENT = "#e6e8ee", "#8b91a0", "#34c3ff"
+TEXT, MUTED, ACCENT, WARN = "#e6e8ee", "#8b91a0", "#34c3ff", "#ffab40"
 
 QSS = f"""
 * {{ font-size: 10pt; }}
@@ -23,6 +23,8 @@ QPushButton {{ background: {FIELD}; border: 1px solid {BORDER}; border-radius: 6
 QPushButton:hover {{ border-color: {ACCENT}; }}
 QPushButton:pressed {{ background: {BORDER}; }}
 QPushButton:disabled {{ color: {MUTED}; }}
+QPushButton#icon {{ padding: 0; min-width: 32px; max-width: 32px; min-height: 30px; }}
+QDialogButtonBox QPushButton {{ min-width: 90px; }}
 QPushButton#primary {{ background: {ACCENT}; color: #000; border: none; font-weight: bold; }}
 QPushButton#primary:hover {{ background: #6dd5ff; }}
 QPushButton#primary:disabled {{ background: {BORDER}; color: {MUTED}; }}
@@ -44,13 +46,15 @@ QMenuBar {{ background: {BG}; }}
 QMenuBar::item {{ padding: 5px 10px; border-radius: 4px; }}
 QMenuBar::item:selected {{ background: {FIELD}; }}
 QMenu {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 6px; padding: 4px; }}
-QMenu::item {{ padding: 6px 28px 6px 14px; border-radius: 4px; }}
+QMenu::item {{ padding: 6px 40px 6px 10px; border-radius: 4px; }}
+QMenu::icon {{ padding-left: 8px; }}
 QMenu::item:selected {{ background: #1f4d66; }}
 QMenu::item:disabled {{ color: {MUTED}; }}
 QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 8px; }}
 QProgressBar {{ background: {FIELD}; border: none; border-radius: 4px; height: 8px; text-align: center;
     color: {TEXT}; font-size: 8pt; }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
+QTableWidget QProgressBar {{ margin: 11px 10px; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle {{ background: {BORDER}; border-radius: 4px; min-height: 30px; min-width: 30px; }}
@@ -61,7 +65,15 @@ QSplitter::handle {{ background: transparent; width: 6px; }}
 QStatusBar {{ background: {BG}; color: {MUTED}; }}
 QStatusBar QLabel {{ color: {MUTED}; padding: 0 8px; }}
 QLabel#heading {{ color: {MUTED}; font-weight: bold; font-size: 9pt; padding: 4px 2px; }}
-QCheckBox::indicator, QRadioButton::indicator {{ width: 14px; height: 14px; }}
+QCheckBox {{ spacing: 8px; }}
+QCheckBox::indicator, QListWidget::indicator {{ width: 14px; height: 14px; border: 1px solid #5a6275;
+    border-radius: 3px; background: {FIELD}; }}
+QCheckBox::indicator:hover, QListWidget::indicator:hover {{ border-color: {ACCENT}; }}
+QCheckBox::indicator:checked, QListWidget::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QGroupBox {{ border: 1px solid {BORDER}; border-radius: 6px; margin-top: 16px; padding: 8px 6px 4px 6px; }}
+QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: {MUTED}; font-weight: bold; }}
+QLabel#warning {{ color: {WARN}; }}
+QLabel#hint {{ color: {MUTED}; font-size: 9pt; }}
 """
 
 

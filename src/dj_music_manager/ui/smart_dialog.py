@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout
 
 from ..quality.badge import BADGES
 from ..smart import FIELDS, OPS
+from .icons import icon
 
 
 class RuleRow(QWidget):
@@ -16,7 +17,7 @@ class RuleRow(QWidget):
             self.field.addItem(label, key)
         self.op = QComboBox()
         self.value = QComboBox(editable=True, minimumWidth=180)
-        self.remove = QPushButton("–", maximumWidth=30)
+        self.remove = QPushButton(icon("x"), "", objectName="icon", toolTip="Retirer cette règle")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         for w in (self.field, self.op, self.value, self.remove):
@@ -63,12 +64,18 @@ class SmartPlaylistDialog(QDialog):
         form.addRow("Nom", self.name_edit)
         form.addRow("Les sons qui respectent", self.match)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Enregistrer")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(self.rows_layout)
-        layout.addWidget(QPushButton("+ Ajouter une règle", clicked=lambda: self._add_row()))
+        add = QPushButton(icon("plus"), " Ajouter une règle", clicked=lambda: self._add_row())
+        add_row = QHBoxLayout()
+        add_row.addWidget(add)
+        add_row.addStretch()
+        layout.addLayout(add_row)
         layout.addWidget(buttons)
         for rule in (rules or {}).get("rules", []) or [None]:
             self._add_row(rule)
