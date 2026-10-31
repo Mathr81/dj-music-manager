@@ -279,6 +279,22 @@ class Library:
         with self._tx() as db:
             db.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
 
+    def duplicate_playlist(self, playlist_id: int, name: str) -> int:
+        """Copie manuelle (ou intelligente, mêmes règles), sans lien source : un import ne la touchera pas."""
+        p = self.playlist(playlist_id)
+        new_id = self.create_playlist(name, json.loads(p["rules_json"]) if p["kind"] == "smart" else None)
+        if p["kind"] == "manual":
+            self.add_to_playlist(new_id, self.playlist_track_ids(playlist_id))
+        return new_id
+
+    def delete_tracks(self, track_ids: list[int]) -> list[str]:
+        """Retire ces sons de la base (playlists, tags, ID externes suivent) ; renvoie leurs chemins relatifs."""
+        with self._tx() as db:
+            paths = [r[0] for t in track_ids for r in db.execute("SELECT path FROM tracks WHERE id = ?", (t,))]
+            db.executemany("DELETE FROM tracks WHERE id = ?", [(t,) for t in track_ids])
+            db.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM track_tags)")
+        return paths
+
     def add_to_playlist(self, playlist_id: int, track_ids: list[int]):
         """Ajoute en fin de playlist ; un son déjà présent garde sa place."""
         with self._tx() as db:

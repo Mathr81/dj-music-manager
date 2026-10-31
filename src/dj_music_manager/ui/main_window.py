@@ -3,10 +3,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLineEdit,
-                               QMainWindow, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
-                               QTabWidget, QVBoxLayout, QWidget)
+from importlib.metadata import version
+
+from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QTableWidget,
+                               QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import config, importer, manual
 from ..api_client import ApiClient
@@ -15,9 +18,31 @@ from ..downloader import Downloader
 from ..library import Library
 from ..spotify import Spotify, track_ids_in
 from .dialogs import ImportDialog, SearchDialog, SettingsDialog
-from .library_panel import LibraryPanel
+from .library_panel import MIME_IDS, LibraryPanel, reveal, search_menu
 
 STATUS = {"queued": "En attente", "running": "En cours", "done": "Terminé", "failed": "Échec"}
+STATUS_COLORS = {"queued": "#8b91a0", "running": "#34c3ff", "done": "#5fd068", "failed": "#ff6b6b"}
+SHORTCUTS = """\
+<table cellpadding=3>
+<tr><td><b>Ctrl+L</b></td><td>Barre de lien / recherche</td></tr>
+<tr><td><b>Ctrl+Maj+V</b></td><td>Coller un lien et l'analyser</td></tr>
+<tr><td><b>Ctrl+O</b></td><td>Scanner un dossier</td></tr>
+<tr><td><b>Ctrl+F</b></td><td>Rechercher dans la bibliothèque</td></tr>
+<tr><td><b>Échap</b></td><td>Effacer les filtres</td></tr>
+<tr><td><b>Ctrl+N / Ctrl+Maj+N</b></td><td>Nouvelle playlist / intelligente</td></tr>
+<tr><td><b>Ctrl+E</b></td><td>Exporter pour logiciel DJ</td></tr>
+<tr><td><b>Ctrl+1 / 2 / 3</b></td><td>Bibliothèque / File d'attente / Échecs</td></tr>
+<tr><td><b>Ctrl+P</b></td><td>Pause / reprise des téléchargements</td></tr>
+<tr><td><b>Ctrl+,</b></td><td>Réglages</td></tr>
+<tr><td><b>Entrée, double-clic</b></td><td>Lire le son</td></tr>
+<tr><td><b>Ctrl+C</b></td><td>Copier « Artiste – Titre »</td></tr>
+<tr><td><b>Ctrl+T</b></td><td>Ajouter des tags</td></tr>
+<tr><td><b>Suppr</b></td><td>Retirer de la playlist (dans « Toute la bibliothèque » : supprimer)</td></tr>
+<tr><td><b>Maj+Suppr</b></td><td>Supprimer de la bibliothèque</td></tr>
+<tr><td><b>F2</b></td><td>Renommer la playlist</td></tr>
+</table>
+<p>Glisse des sons sur une playlist pour les y ajouter, ou hors de l'app (rekordbox, Explorateur) comme fichiers.
+Glisse des fichiers audio sur la fenêtre pour les ajouter à la bibliothèque.</p>"""
 
 
 class Bridge(QObject):
@@ -53,17 +78,20 @@ class MainWindow(QMainWindow):
         self.bridge.manual_done.connect(self._on_manual_done)
         self.setAcceptDrops(True)
 
-        self.link = QLineEdit(placeholderText="Lien Deezer ou Spotify (titre, album, playlist), ou recherche : artiste titre")
+        self.link = QLineEdit(placeholderText="Colle un lien Deezer ou Spotify (titre, album, playlist), "
+                                              "ou cherche : artiste titre", objectName="link", clearButtonEnabled=True)
         self.link.returnPressed.connect(self._analyze)
-        self.analyze_btn = QPushButton("Analyser", clicked=self._analyze)
+        self.analyze_btn = QPushButton("Analyser", clicked=self._analyze, objectName="primary")
         top = QHBoxLayout()
         top.addWidget(self.link)
         top.addWidget(self.analyze_btn)
-        top.addWidget(QPushButton("Scanner un dossier…", clicked=self._scan_folder))
-        top.addWidget(QPushButton("Réglages", clicked=self._open_settings))
+        top.addWidget(QPushButton("📂  Scanner…", clicked=self._scan_folder,
+                                  toolTip="Ajouter les fichiers audio d'un dossier (Ctrl+O)"))
+        top.addWidget(QPushButton("⚙  Réglages", clicked=self._open_settings, toolTip="Ctrl+,"))
 
         self.tabs = QTabWidget()
         self.panel = LibraryPanel(lib)
+        self.panel.resync_requested.connect(self._resync)
         self.bridge.track_added.connect(self.panel.show_track)
         self.tabs.addTab(self.panel, "Bibliothèque")
         self.queue_tab = self._queue_tab()
@@ -77,7 +105,88 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._job_rows: dict[int, int] = {}
+        self._was_active = False
+        self.queue_status = QLabel()
+        self.statusBar().addPermanentWidget(self.queue_status)
         self._reload_failures()
+        self._build_menus()
+        geometry = QSettings().value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+
+    def _build_menus(self):
+        bar = self.menuBar()
+        m = bar.addMenu("&Fichier")
+        m.addAction("Analyser un lien ou chercher…", "Ctrl+L", self._focus_link)
+        m.addAction("Coller et analyser", "Ctrl+Shift+V", self._paste_and_analyze)
+        m.addAction("Scanner un dossier…", "Ctrl+O", self._scan_folder)
+        m.addAction("Ajouter des fichiers…", self._add_files)
+        m.addSeparator()
+        m.addAction("Exporter pour logiciel DJ…", "Ctrl+E", self.panel.export)
+        m.addSeparator()
+        m.addAction("Ouvrir le dossier RAW", lambda: self._open_dir(self.lib.get_setting("raw_dir")))
+        m.addAction("Ouvrir le dossier des données", lambda: self._open_dir(config.data_dir()))
+        m.addAction("Réglages…", "Ctrl+,", self._open_settings)
+        m.addSeparator()
+        m.addAction("Quitter", "Ctrl+Q", self.close)
+
+        m = bar.addMenu("&Bibliothèque")
+        m.addAction("Rechercher", "Ctrl+F", self._focus_search)
+        m.addAction("Effacer les filtres", self.panel.clear_filters)
+        m.addSeparator()
+        m.addAction("Nouvelle playlist…", "Ctrl+N", self.panel.new_playlist)
+        m.addAction("Nouvelle playlist intelligente…", "Ctrl+Shift+N", self.panel.new_smart)
+
+        m = bar.addMenu("&Affichage")
+        for i, name in enumerate(("Bibliothèque", "File d'attente", "Échecs"), 1):
+            m.addAction(name, f"Ctrl+{i}", lambda i=i: self.tabs.setCurrentIndex(i - 1))
+
+        m = bar.addMenu("&Téléchargements")
+        self.pause_action = m.addAction("Mettre en pause", "Ctrl+P", self._toggle_pause)
+        m.addAction("Relancer tous les échecs", self._retry_all)
+        m.addSeparator()
+        m.addAction("Retirer les terminés de la file", self._clear_done)
+        m.addAction("Vider la file…", self._clear_queue)
+        m.addSeparator()
+        m.addAction("Journal des erreurs API", self._open_api_log)
+
+        m = bar.addMenu("&Aide")
+        m.addAction("Raccourcis clavier", "F1", lambda: QMessageBox.information(self, "Raccourcis clavier", SHORTCUTS))
+        m.addAction("Créer l'app Spotify (developer.spotify.com)",
+                    lambda: QDesktopServices.openUrl(QUrl("https://developer.spotify.com/dashboard")))
+        m.addSeparator()
+        m.addAction("À propos", lambda: QMessageBox.about(
+            self, "À propos", f"<h3>DJ Music Manager {version('dj-music-manager')}</h3>"
+                              "<p>Bibliothèque musicale pour DJ : un dossier RAW, chaque son une seule fois, "
+                              "playlists et tags par-dessus, export vers rekordbox, Serato, VirtualDJ et Mixxx.</p>"))
+
+    def _focus_link(self):
+        self.link.setFocus()
+        self.link.selectAll()
+
+    def _focus_search(self):
+        self.tabs.setCurrentWidget(self.panel)
+        self.panel.focus_search()
+
+    def _paste_and_analyze(self):
+        self.link.setText(QApplication.clipboard().text().strip())
+        self._analyze()
+
+    def _resync(self, url: str):
+        self.link.setText(url)
+        self._analyze()
+
+    def _open_dir(self, path):
+        if path and Path(path).is_dir():
+            os.startfile(path)
+        else:
+            QMessageBox.information(self, "Dossier", "Dossier introuvable : vérifie les Réglages.")
+
+    def _add_files(self):
+        exts = " ".join(f"*{e}" for e in sorted(manual.AUDIO_EXTS))
+        paths, _ = QFileDialog.getOpenFileNames(self, "Ajouter des fichiers", "", f"Audio ({exts})")
+        if paths:
+            self._add_paths(paths)
 
     # --- construction
     @staticmethod
@@ -88,10 +197,15 @@ class MainWindow(QMainWindow):
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         t.verticalHeader().hide()
+        t.verticalHeader().setDefaultSectionSize(30)
+        t.setAlternatingRowColors(True)
+        t.setShowGrid(False)
         return t
 
     def _queue_tab(self) -> QWidget:
         self.queue = self._table(("Piste", "Qualité", "Statut", "Progression"))
+        self.queue.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.queue.customContextMenuRequested.connect(self._queue_menu)
         self.pause_btn = QPushButton("Mettre en pause", clicked=self._toggle_pause)
         buttons = QHBoxLayout()
         buttons.addWidget(self.pause_btn)
@@ -107,6 +221,9 @@ class MainWindow(QMainWindow):
     def _failures_tab(self) -> QWidget:
         self.failures = self._table(("Piste", "Code", "Message"))
         self.failures.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.failures.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.failures.customContextMenuRequested.connect(self._failures_menu)
+        self.failures.doubleClicked.connect(lambda _: self._search_selected())
         buttons = QHBoxLayout()
         buttons.addWidget(QPushButton("Relancer la sélection", clicked=self._retry_selected))
         buttons.addWidget(QPushButton("Chercher à la main…", clicked=self._search_selected))
@@ -222,7 +339,7 @@ class MainWindow(QMainWindow):
 
     # --- ajout manuel (glisser-déposer ou scan)
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and not event.mimeData().hasFormat(MIME_IDS):  # pas nos propres sons
             event.acceptProposedAction()
 
     def dropEvent(self, event):
@@ -302,6 +419,7 @@ class MainWindow(QMainWindow):
             bar.setValue(payload)
             return
         self.queue.item(row, 2).setText(STATUS[job["status"]])
+        self.queue.item(row, 2).setForeground(QColor(STATUS_COLORS[job["status"]]))
         self.queue.item(row, 2).setToolTip(job["error"] or "")
         if job["status"] == "queued":
             bar.setValue(0)
@@ -310,6 +428,69 @@ class MainWindow(QMainWindow):
             self.panel.show_track(job["track_id"])
         if job["status"] in ("queued", "failed"):
             self._reload_failures()
+        self._update_queue_status()
+
+    def _update_queue_status(self):
+        counts = {}
+        for r in range(self.queue.rowCount()):
+            text = self.queue.item(r, 2).text()
+            counts[text] = counts.get(text, 0) + 1
+        active = counts.get(STATUS["queued"], 0) + counts.get(STATUS["running"], 0)
+        self.queue_status.setText(f"⬇ {active} en cours · {counts.get(STATUS['done'], 0)} terminés"
+                                  if self.queue.rowCount() else "")
+        self.tabs.setTabText(1, f"File d'attente ({active})" if active else "File d'attente")
+        if self._was_active and not active:
+            self.statusBar().showMessage("Tous les téléchargements sont terminés", 10000)
+            QApplication.alert(self)  # fait clignoter l'app dans la barre des tâches
+        self._was_active = bool(active)
+
+    def _queue_menu(self, pos):
+        rows = sorted({i.row() for i in self.queue.selectedItems()})
+        if not rows:
+            return
+        jobs = [self.lib.job(self.queue.item(r, 0).data(Qt.UserRole)) for r in rows]
+        menu = QMenu(self)
+        done = [j for j in jobs if j and j["status"] == "done" and j["track_id"]]
+        if len(done) == 1 and (t := self.lib.track(done[0]["track_id"])):
+            menu.addAction("Afficher dans l'Explorateur",
+                           lambda: reveal(Path(self.lib.get_setting("raw_dir", "")) / t["path"]))
+        failed = [j["id"] for j in jobs if j and j["status"] == "failed"]
+        if failed:
+            menu.addAction("Relancer", lambda: self._ensure_api() and self.downloader.submit(failed))
+        menu.addAction("Copier « Artiste – Titre »", lambda: QApplication.clipboard().setText(
+            "\n".join(self.queue.item(r, 0).text() for r in rows)))
+        if len(rows) == 1:
+            search_menu(menu, self.queue.item(rows[0], 0).text().replace(" – ", " "))
+        menu.addSeparator()
+        menu.addAction("Retirer de la file (annule si en cours)", self._remove_queued)
+        menu.exec(self.queue.viewport().mapToGlobal(pos))
+
+    def _failures_menu(self, pos):
+        rows = sorted({i.row() for i in self.failures.selectedItems()})
+        if not rows:
+            return
+        menu = QMenu(self)
+        menu.addAction("Relancer", self._retry_selected)
+        if len(rows) == 1:
+            menu.addAction("Chercher à la main…", self._search_selected)
+            search_menu(menu, self.failures.item(rows[0], 0).text().replace(" – ", " "))
+        copy = menu.addMenu("Copier")
+        copy.addAction("« Artiste – Titre »", lambda: QApplication.clipboard().setText(
+            "\n".join(self.failures.item(r, 0).text() for r in rows)))
+        copy.addAction("Message d'erreur", lambda: QApplication.clipboard().setText(
+            "\n".join(f"{self.failures.item(r, 0).text()} : {self.failures.item(r, 2).toolTip()}" for r in rows)))
+        menu.addSeparator()
+        menu.addAction("Supprimer", self._remove_failures)
+        menu.exec(self.failures.viewport().mapToGlobal(pos))
+
+    def _retry_all(self):
+        jobs = self.lib.failed_jobs()
+        if jobs and self._ensure_api():
+            self.downloader.submit([j["id"] for j in jobs])
+
+    def _clear_done(self):
+        self._drop_from_queue([r for r in range(self.queue.rowCount())
+                               if self.queue.item(r, 2).text() == STATUS["done"]])
 
     def _reload_failures(self):
         jobs = self.lib.failed_jobs()
@@ -336,6 +517,7 @@ class MainWindow(QMainWindow):
         else:
             self.downloader.pause()
         self.pause_btn.setText("Reprendre" if self.downloader.paused else "Mettre en pause")
+        self.pause_action.setText(self.pause_btn.text())
         self.statusBar().showMessage("File en pause : les téléchargements en cours se terminent"
                                      if self.downloader.paused else "File relancée", 5000)
 
@@ -349,6 +531,7 @@ class MainWindow(QMainWindow):
         for r in sorted(rows, reverse=True):
             self.queue.removeRow(r)
         self._job_rows = {self.queue.item(r, 0).data(Qt.UserRole): r for r in range(self.queue.rowCount())}
+        self._update_queue_status()
 
     def _remove_queued(self):
         self._drop_from_queue(sorted({i.row() for i in self.queue.selectedItems()}))
@@ -391,6 +574,8 @@ class MainWindow(QMainWindow):
             self.downloader.submit([job["id"]])
 
     def closeEvent(self, event):
+        QSettings().setValue("window/geometry", self.saveGeometry())
+        self.panel.save_state()
         if self.downloader:
             self.downloader.close()
             self.api.close()  # coupe les téléchargements en cours ; ils seront relançables au prochain démarrage

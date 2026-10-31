@@ -1,31 +1,72 @@
-"""Vue bibliothèque : playlists à gauche, filtres rapides, liste des sons, tags et playlists au clic droit."""
+"""Vue bibliothèque : playlists à gauche, filtres rapides, liste des sons, clics droits, glisser-déposer."""
 
 import json
+import os
+import subprocess
 import threading
 from importlib.metadata import version
 from pathlib import Path
+from urllib.parse import quote_plus
 
-from PySide6.QtCore import QObject, QSortFilterProxyModel, Qt, Signal
-from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
-                               QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
+from PySide6.QtCore import QByteArray, QItemSelectionModel, QMimeData, QObject, QSettings, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+                               QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                               QPushButton, QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
+from send2trash import send2trash
 
 from .. import config, export, manual
 from ..library import Library
 from ..quality.badge import BADGES
-from .dialogs import fmt_duration
+from .dialogs import fmt_duration, plural
 from .export_dialog import HOW_TO, ExportDialog
 from .smart_dialog import SmartPlaylistDialog
 
 SORT_ROLE = Qt.UserRole + 1
 ID_ROLE = Qt.UserRole + 2
 TAGS_ROLE = Qt.UserRole + 3
+PATH_ROLE = Qt.UserRole + 4
+KIND_ROLE = Qt.UserRole + 1  # sur les éléments de la liste des playlists
+MIME_IDS = "application/x-djmm-track-ids"  # glisser des sons d'une vue à l'autre
 DURATION_WARNING = 10  # s d'écart avec la durée attendue : radio edit, clip, mauvaise version
-BADGE_COLORS = {"Lossless": "#2e7d32", "320": "#558b2f", "256": "#9e9d24", "192": "#ef6c00", "128": "#c62828",
-                "Faux FLAC": "#c62828", "Transcode": "#c62828"}
+BADGE_COLORS = {"Lossless": "#5fd068", "320": "#a5d65a", "256": "#d8dc5a", "192": "#ffab40", "128": "#ff6b6b",
+                "Faux FLAC": "#ff6b6b", "Transcode": "#ff6b6b"}
 COLUMNS = ("#", "Artiste", "Titre", "Qualité", "Durée", "BPM", "Tags", "Format", "Album", "Ajouté le")
-COL_POS, COL_QUALITY, COL_BPM, COL_TAGS, COL_ADDED = 0, 3, 5, 6, 9
+COL_POS, COL_ARTIST, COL_TITLE, COL_QUALITY, COL_DURATION, COL_BPM, COL_TAGS, COL_ADDED = 0, 1, 2, 3, 4, 5, 6, 9
+SEARCH_SITES = {
+    "Spotify": "https://open.spotify.com/search/{}",
+    "YouTube": "https://www.youtube.com/results?search_query={}",
+    "Beatport": "https://www.beatport.com/search?q={}",
+    "SoundCloud": "https://soundcloud.com/search?q={}",
+    "Deezer": "https://www.deezer.com/search/{}",
+    "Google": "https://www.google.com/search?q={}",
+}
+
+
+def reveal(path: Path):
+    """Ouvre l'Explorateur sur le fichier sélectionné (ou son dossier s'il a disparu)."""
+    if path.exists():
+        subprocess.Popen(["explorer", "/select,", str(path)])
+    elif path.parent.exists():
+        os.startfile(path.parent)
+
+
+def play(path: Path, parent=None):
+    if path.exists():
+        os.startfile(path)  # lecteur par défaut de Windows
+    else:
+        QMessageBox.warning(parent, "Lecture", f"Fichier introuvable :\n{path}")
+
+
+def web_search(site: str, query: str):
+    QDesktopServices.openUrl(QUrl(SEARCH_SITES[site].format(quote_plus(query))))
+
+
+def search_menu(menu: QMenu, query: str) -> QMenu:
+    sub = menu.addMenu("Rechercher sur")
+    for site in SEARCH_SITES:
+        sub.addAction(site, lambda s=site: web_search(s, query))
+    return sub
 
 
 def _item(text, sort=None) -> QStandardItem:
@@ -38,8 +79,9 @@ def _item(text, sort=None) -> QStandardItem:
 class TrackFilter(QSortFilterProxyModel):
     """Filtre par playlist (ensemble d'ID + ordre), texte, tag, qualité, BPM ; colonne « # » = position."""
 
-    def __init__(self):
+    def __init__(self, lib: Library):
         super().__init__(sortRole=SORT_ROLE)
+        self.lib = lib
         self.order: dict[int, int] | None = None  # ID -> position ; None = toute la bibliothèque
         self.text = self.tag = self.badge = ""
         self.bpm_min = self.bpm_max = 0
@@ -78,6 +120,54 @@ class TrackFilter(QSortFilterProxyModel):
             return "" if pos is None else pos + 1
         return super().data(index, role)
 
+    def mimeTypes(self):
+        return [MIME_IDS, "text/uri-list"]
+
+    def mimeData(self, indexes):
+        """Les sons glissés : leurs ID (vers une playlist) et leurs fichiers (vers rekordbox, l'Explorateur…)."""
+        rows = sorted({i.row() for i in indexes})
+        ids = [self.index(r, 0).data(ID_ROLE) for r in rows]
+        raw = Path(self.lib.get_setting("raw_dir", ""))
+        data = QMimeData()
+        data.setData(MIME_IDS, QByteArray(json.dumps(ids).encode()))
+        data.setUrls([QUrl.fromLocalFile(str(raw / self.index(r, 0).data(PATH_ROLE))) for r in rows])
+        return data
+
+
+class PlaylistList(QListWidget):
+    """Liste des playlists : on y dépose des sons pour les ajouter à une playlist manuelle."""
+    tracks_dropped = Signal(int, list)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def _target(self, event):
+        item = self.itemAt(event.position().toPoint())
+        ok = event.mimeData().hasFormat(MIME_IDS) and item is not None and item.data(KIND_ROLE) == "manual"
+        return item if ok else None
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(MIME_IDS):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        item = self._target(event)
+        if item:
+            self.setCurrentItem(item, QItemSelectionModel.NoUpdate)  # surligne la cible sans changer de playlist
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        item = self._target(event)
+        if item:
+            self.tracks_dropped.emit(item.data(Qt.UserRole), json.loads(bytes(event.mimeData().data(MIME_IDS))))
+            event.acceptProposedAction()
+
 
 class _Signals(QObject):
     replaced = Signal(int, str)  # ID du son, message d'erreur (vide si réussi)
@@ -86,6 +176,8 @@ class _Signals(QObject):
 
 
 class LibraryPanel(QWidget):
+    resync_requested = Signal(str)  # lien source d'une playlist importée
+
     def __init__(self, lib: Library, parent=None):
         super().__init__(parent)
         self.lib = lib
@@ -98,26 +190,34 @@ class LibraryPanel(QWidget):
         self._shown = -1  # playlist affichée (None = toute la bibliothèque)
 
         # playlists
-        self.playlists = QListWidget()
+        self.playlists = PlaylistList()
         self.playlists.currentItemChanged.connect(lambda *_: self.refresh_current())
         self.playlists.setContextMenuPolicy(Qt.CustomContextMenu)
         self.playlists.customContextMenuRequested.connect(self._playlist_menu)
+        self.playlists.tracks_dropped.connect(self._add_to)
+        self._shortcut(self.playlists, "F2", lambda: self._on_current_playlist(self._rename))
+        self._shortcut(self.playlists, QKeySequence.Delete, lambda: self._on_current_playlist(self._delete))
         new_buttons = QHBoxLayout()
-        new_buttons.addWidget(QPushButton("+ Playlist", clicked=self._new_playlist))
-        new_buttons.addWidget(QPushButton("+ Intelligente", clicked=self._new_smart))
+        new_buttons.addWidget(QPushButton("＋ Playlist", clicked=self.new_playlist,
+                                          toolTip="Nouvelle playlist (Ctrl+N)"))
+        new_buttons.addWidget(QPushButton("＋ Intelligente", clicked=self.new_smart,
+                                          toolTip="Playlist à règles : BPM, tags, qualité… (Ctrl+Maj+N)"))
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(QLabel("PLAYLISTS", objectName="heading"))
         left_layout.addWidget(self.playlists)
         left_layout.addLayout(new_buttons)
-        left_layout.addWidget(QPushButton("Exporter pour logiciel DJ…", clicked=lambda: self._export()))
+        left_layout.addWidget(QPushButton("Exporter pour logiciel DJ…", clicked=lambda: self.export(),
+                                          toolTip="rekordbox, Serato, VirtualDJ, Mixxx… (Ctrl+E)"))
 
         # filtres rapides
         self.model = QStandardItemModel(0, len(COLUMNS))
         self.model.setHorizontalHeaderLabels(COLUMNS)
-        self.proxy = TrackFilter()
+        self.proxy = TrackFilter(lib)
         self.proxy.setSourceModel(self.model)
-        self.search = QLineEdit(placeholderText="Rechercher (artiste, titre, album, tag…)")
+        self.search = QLineEdit(placeholderText="🔍  Rechercher…  (Ctrl+F)",
+                                clearButtonEnabled=True)
         self.search.textChanged.connect(lambda t: self._set_filter(text=t.strip()))
         self.tag_filter = QComboBox(minimumWidth=140)
         self.tag_filter.currentIndexChanged.connect(lambda: self._set_filter(tag=self.tag_filter.currentData() or ""))
@@ -126,9 +226,11 @@ class LibraryPanel(QWidget):
         for b in BADGES:
             self.badge_filter.addItem(b, b)
         self.badge_filter.currentIndexChanged.connect(lambda: self._set_filter(badge=self.badge_filter.currentData()))
-        self.bpm_min, self.bpm_max = (QSpinBox(maximum=300, specialValueText="–") for _ in range(2))
+        self.bpm_min, self.bpm_max = (QSpinBox(maximum=300, specialValueText="–", maximumWidth=60,
+                                               buttonSymbols=QSpinBox.NoButtons) for _ in range(2))
         self.bpm_min.valueChanged.connect(lambda v: self._set_filter(bpm_min=v))
         self.bpm_max.valueChanged.connect(lambda v: self._set_filter(bpm_max=v))
+        reset = QPushButton("✕", toolTip="Effacer les filtres (Échap)", clicked=self.clear_filters, maximumWidth=36)
         filters = QHBoxLayout()
         filters.addWidget(self.search, 1)
         filters.addWidget(self.tag_filter)
@@ -137,35 +239,91 @@ class LibraryPanel(QWidget):
         filters.addWidget(self.bpm_min)
         filters.addWidget(QLabel("à"))
         filters.addWidget(self.bpm_max)
+        filters.addWidget(reset)
 
         # liste des sons
-        self.view = QTableView(sortingEnabled=True)
+        self.view = QTableView(sortingEnabled=True, alternatingRowColors=True, showGrid=False, wordWrap=False)
         self.view.setModel(self.proxy)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.view.setDragDropMode(QAbstractItemView.DragOnly)
+        self.view.setDragEnabled(True)
         self.view.verticalHeader().hide()
-        self.view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        for col, width in enumerate((40, 180, 250, 90, 65, 50, 160, 70, 180)):
+        self.view.verticalHeader().setDefaultSectionSize(30)
+        header = self.view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setHighlightSections(False)
+        header.setSectionsMovable(True)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._header_menu)
+        for col, width in enumerate((40, 180, 250, 105, 75, 60, 160, 75, 180)):
             self.view.setColumnWidth(col, width)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._track_menu)
+        self.view.doubleClicked.connect(lambda _: self._play_selected())
+        self._shortcut(self.view, Qt.Key_Return, self._play_selected)
+        self._shortcut(self.view, QKeySequence.Copy, lambda: self._copy(self._names()))
+        self._shortcut(self.view, QKeySequence.Delete, self._delete_key)
+        self._shortcut(self.view, "Shift+Del", lambda: self._delete_tracks(self._selected_ids()))
+        self._shortcut(self.view, "Ctrl+T", lambda: self._selected_ids() and self._add_tags(self._selected_ids()))
+        self._shortcut(self, Qt.Key_Escape, self.clear_filters)
+        self.stats = QLabel()
+        self.proxy.rowsInserted.connect(self._update_stats)
+        self.proxy.rowsRemoved.connect(self._update_stats)
+        self.proxy.layoutChanged.connect(self._update_stats)
+        self.proxy.modelReset.connect(self._update_stats)
+        self.view.selectionModel().selectionChanged.connect(self._update_stats)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addLayout(filters)
         right_layout.addWidget(self.view)
+        right_layout.addWidget(self.stats)
 
-        splitter = QSplitter()
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([220, 980])
+        self.splitter = QSplitter()
+        self.splitter.addWidget(left)
+        self.splitter.addWidget(right)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([240, 960])
         layout = QVBoxLayout(self)
-        layout.addWidget(splitter)
+        layout.addWidget(self.splitter)
 
         tags = lib.tags_by_track()
         for t in lib.tracks():
             self._set_row(t, tags.get(t["id"], []))
         self.refresh_tags()
         self.refresh_playlists()
+        self._restore_state()
+
+    @staticmethod
+    def _shortcut(widget: QWidget, keys, slot) -> QAction:
+        action = QAction(widget, shortcut=QKeySequence(keys), shortcutContext=Qt.WidgetWithChildrenShortcut)
+        action.triggered.connect(slot)
+        widget.addAction(action)
+        return action
+
+    # --- état mémorisé (colonnes, séparateur)
+    def _restore_state(self):
+        s = QSettings()
+        if s.value("library/header") is not None:
+            self.view.horizontalHeader().restoreState(s.value("library/header"))
+        if s.value("library/splitter") is not None:
+            self.splitter.restoreState(s.value("library/splitter"))
+
+    def save_state(self):
+        s = QSettings()
+        s.setValue("library/header", self.view.horizontalHeader().saveState())
+        s.setValue("library/splitter", self.splitter.saveState())
+
+    def _header_menu(self, pos):
+        menu = QMenu(self)
+        for col, name in enumerate(COLUMNS):
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(not self.view.isColumnHidden(col))
+            action.toggled.connect(lambda on, c=col: self.view.setColumnHidden(c, not on))
+        menu.addSeparator()
+        menu.addAction("Ajuster les largeurs", self.view.resizeColumnsToContents)
+        menu.exec(self.view.horizontalHeader().mapToGlobal(pos))
 
     # --- lignes
     def show_track(self, track_id: int):
@@ -185,13 +343,18 @@ class LibraryPanel(QWidget):
                                                          f"coupure {t['max_frequency']} Hz") if v))
         if t["badge"] in BADGE_COLORS:
             quality.setForeground(QColor(BADGE_COLORS[t["badge"]]))
+            bold = QFont()
+            bold.setBold(True)
+            quality.setFont(bold)
         first = _item("", 0)
         first.setData(t["id"], ID_ROLE)
+        first.setData(t["path"], PATH_ROLE)
         items = [
             first, _item(t["artist"]), _item(t["title"]), quality, duration,
             _item(f"{t['bpm']:.0f}" if t["bpm"] else "", t["bpm"] or 0), self._tags_item(tags),
             _item(t["format"]), _item(t["album"]), _item(t["added_at"].replace("T", " "), t["added_at"]),
         ]
+        items[COL_TITLE].setToolTip(t["path"])
         row = self._rows.get(t["id"])
         if row is None:
             self._rows[t["id"]] = self.model.rowCount()
@@ -206,15 +369,55 @@ class LibraryPanel(QWidget):
         item.setData([t.casefold() for t in tags], TAGS_ROLE)
         return item
 
+    def _selected_rows(self) -> list[int]:
+        return sorted(r.row() for r in self.view.selectionModel().selectedRows())
+
     def _selected_ids(self) -> list[int]:
-        rows = self.view.selectionModel().selectedRows()
-        return [self.proxy.index(r.row(), 0).data(ID_ROLE) for r in rows]
+        return [self.proxy.index(r, 0).data(ID_ROLE) for r in self._selected_rows()]
+
+    def _path(self, row: int) -> Path:
+        return Path(self.lib.get_setting("raw_dir", "")) / self.proxy.index(row, 0).data(PATH_ROLE)
+
+    def _names(self) -> str:
+        return "\n".join(f"{self.proxy.index(r, COL_ARTIST).data()} – {self.proxy.index(r, COL_TITLE).data()}"
+                         for r in self._selected_rows())
+
+    def _update_stats(self):
+        def total(rows):
+            s = sum(self.proxy.index(r, COL_DURATION).data(SORT_ROLE) or 0 for r in rows)
+            return f"{int(s // 3600)} h {int(s % 3600 // 60):02d}" if s >= 3600 else fmt_duration(s)
+
+        n = self.proxy.rowCount()
+        text = f"{plural(n, 'son')} · {total(range(n))}"
+        if n != self.model.rowCount():
+            text += f"   (sur {self.model.rowCount()})"
+        selected = self._selected_rows()
+        if len(selected) > 1:
+            text += f"   —   {plural(len(selected), 'sélectionné')} · {total(selected)}"
+        self.stats.setText(text)
 
     # --- filtres
     def _set_filter(self, **values):
         for k, v in values.items():
             setattr(self.proxy, k, v)
         self.proxy.refilter()
+        self._update_stats()
+
+    def clear_filters(self):
+        for w in (self.search, self.tag_filter, self.badge_filter, self.bpm_min, self.bpm_max):
+            w.blockSignals(True)
+        self.search.clear()
+        self.tag_filter.setCurrentIndex(0)
+        self.badge_filter.setCurrentIndex(0)
+        self.bpm_min.setValue(0)
+        self.bpm_max.setValue(0)
+        for w in (self.search, self.tag_filter, self.badge_filter, self.bpm_min, self.bpm_max):
+            w.blockSignals(False)
+        self._set_filter(text="", tag="", badge="", bpm_min=0, bpm_max=0)
+
+    def focus_search(self):
+        self.search.setFocus()
+        self.search.selectAll()
 
     def refresh_tags(self):
         """Recharge la colonne Tags et la liste du filtre."""
@@ -237,17 +440,26 @@ class LibraryPanel(QWidget):
         item = self.playlists.currentItem()
         return self.lib.playlist(item.data(Qt.UserRole)) if item and item.data(Qt.UserRole) else None
 
+    def _on_current_playlist(self, action):
+        p = self._current_playlist()
+        if p is not None:
+            action(p)
+
     def refresh_playlists(self):
         current = self.playlists.currentItem().data(Qt.UserRole) if self.playlists.currentItem() else None
         self.playlists.blockSignals(True)
         self.playlists.clear()
-        self.playlists.addItem(QListWidgetItem("Toute la bibliothèque"))
+        everything = QListWidgetItem(f"♫  Toute la bibliothèque  ({self.model.rowCount()})")
+        self.playlists.addItem(everything)
         for p in self.lib.playlists():
             icon = "⚙" if p["kind"] == "smart" else "↻" if p["source_url"] else "♪"
             item = QListWidgetItem(f"{icon}  {p['name']}  ({len(self.lib.playlist_track_ids(p['id']))})")
             item.setData(Qt.UserRole, p["id"])
+            item.setData(KIND_ROLE, p["kind"])
             if p["source_url"]:
-                item.setToolTip(f"Importée de {p['source_url']}\nUn nouvel import resynchronise son contenu.")
+                item.setToolTip(f"Importée de {p['source_url']}\nClic droit > Resynchroniser pour la mettre à jour.")
+            elif p["kind"] == "manual":
+                item.setToolTip("Glisse des sons ici pour les ajouter.")
             self.playlists.addItem(item)
             if p["id"] == current:
                 self.playlists.setCurrentItem(item)
@@ -264,16 +476,19 @@ class LibraryPanel(QWidget):
         self.proxy.invalidate()  # le filtre et le tri « # » dépendent de l'ordre
         if switched:  # sinon on garde le tri choisi par l'utilisateur
             self.view.sortByColumn(*((COL_POS, Qt.AscendingOrder) if p else (COL_ADDED, Qt.DescendingOrder)))
+        self._update_stats()
 
-    def _new_playlist(self):
+    def new_playlist(self, ids: list[int] | None = None):
         name, ok = QInputDialog.getText(self, "Nouvelle playlist", "Nom :")
         if ok and name.strip():
             pid = self.lib.create_playlist(name.strip())
+            if ids:
+                self.lib.add_to_playlist(pid, ids)
             self.refresh_playlists()
             return pid
         return None
 
-    def _new_smart(self):
+    def new_smart(self):
         dlg = SmartPlaylistDialog(self.lib.tags(), parent=self)
         if dlg.exec():
             self.lib.create_playlist(dlg.name(), dlg.rules())
@@ -282,20 +497,42 @@ class LibraryPanel(QWidget):
     def _playlist_menu(self, pos):
         item = self.playlists.itemAt(pos)
         p = self.lib.playlist(item.data(Qt.UserRole)) if item and item.data(Qt.UserRole) else None
-        if p is None:
-            return
         menu = QMenu(self)
+        if p is None:
+            menu.addAction("Nouvelle playlist…", self.new_playlist)
+            menu.addAction("Nouvelle playlist intelligente…", self.new_smart)
+            menu.addAction("Tout exporter…", lambda: self.export(None, everything=True))
+            menu.exec(self.playlists.mapToGlobal(pos))
+            return
         if p["kind"] == "smart":
             menu.addAction("Modifier les règles…", lambda: self._edit_smart(p))
-        menu.addAction("Exporter…", lambda: self._export(p["id"]))
-        menu.addAction("Renommer…", lambda: self._rename(p))
-        menu.addAction("Supprimer", lambda: self._delete(p))
+        if p["source_url"]:
+            menu.addAction("↻  Resynchroniser avec la source", lambda: self.resync_requested.emit(p["source_url"]))
+            menu.addAction("Ouvrir la source dans le navigateur", lambda: QDesktopServices.openUrl(QUrl(p["source_url"])))
+            menu.addAction("Copier le lien source", lambda: self._copy(p["source_url"]))
+        menu.addSeparator()
+        menu.addAction("Exporter…", lambda: self.export(p["id"]))
+        menu.addAction("Copier la liste des titres", lambda: self._copy(self._playlist_text(p["id"])))
+        menu.addAction("Dupliquer…", lambda: self._duplicate(p))
+        menu.addAction("Renommer…\tF2", lambda: self._rename(p))
+        menu.addSeparator()
+        menu.addAction("Supprimer\tSuppr", lambda: self._delete(p))
         menu.exec(self.playlists.mapToGlobal(pos))
+
+    def _playlist_text(self, playlist_id: int) -> str:
+        return "\n".join(f"{t['artist']} – {t['title']}" for t in map(self.lib.track,
+                                                                       self.lib.playlist_track_ids(playlist_id)))
 
     def _edit_smart(self, p):
         dlg = SmartPlaylistDialog(self.lib.tags(), p["name"], json.loads(p["rules_json"]), self)
         if dlg.exec():
             self.lib.update_playlist(p["id"], dlg.name(), dlg.rules())
+            self.refresh_playlists()
+
+    def _duplicate(self, p):
+        name, ok = QInputDialog.getText(self, "Dupliquer", "Nom de la copie :", text=f"{p['name']} (copie)")
+        if ok and name.strip():
+            self.lib.duplicate_playlist(p["id"], name.strip())
             self.refresh_playlists()
 
     def _rename(self, p):
@@ -310,18 +547,31 @@ class LibraryPanel(QWidget):
             self.lib.delete_playlist(p["id"])
             self.refresh_playlists()
 
-    # --- clic droit sur les sons
+    # --- clic droit et raccourcis sur les sons
     def _track_menu(self, pos):
         ids = self._selected_ids()
         if not ids:
             return
+        rows = self._selected_rows()
         menu = QMenu(self)
+        menu.addAction("▶  Lire\tEntrée", self._play_selected)
+        menu.addAction("Afficher dans l'Explorateur", lambda: reveal(self._path(rows[0])))
+        copy = menu.addMenu("Copier")
+        copy.addAction("« Artiste – Titre »\tCtrl+C", lambda: self._copy(self._names()))
+        copy.addAction("Chemin du fichier", lambda: self._copy("\n".join(str(self._path(r)) for r in rows)))
+        copy.addAction("Fichier (à coller dans l'Explorateur)", lambda: self._copy_files(rows))
         if len(ids) == 1:
-            menu.addAction("Remplacer le fichier…", lambda: self._replace(ids[0]))
-            menu.addSeparator()
-        menu.addAction("Ajouter des tags…", lambda: self._add_tags(ids))
+            search_menu(menu, f"{self.proxy.index(rows[0], COL_ARTIST).data()} "
+                              f"{self.proxy.index(rows[0], COL_TITLE).data()}")
+        menu.addSeparator()
+        menu.addAction("Ajouter des tags…\tCtrl+T", lambda: self._add_tags(ids))
         tags = self.lib.tags_by_track()
         present = sorted({t for i in ids for t in tags.get(i, [])}, key=str.casefold)
+        existing = [t for t in self.lib.tags() if t not in present]
+        if existing:
+            quick = menu.addMenu("Tag rapide")
+            for name in existing:
+                quick.addAction(name, lambda n=name: (self.lib.add_tags(ids, [n]), self.refresh_tags()))
         if present:
             remove = menu.addMenu("Retirer le tag")
             for name in present:
@@ -331,11 +581,62 @@ class LibraryPanel(QWidget):
             if p["kind"] == "manual":
                 add_to.addAction(p["name"], lambda pid=p["id"]: self._add_to(pid, ids))
         add_to.addSeparator()
-        add_to.addAction("Nouvelle playlist…", lambda: self._add_to(self._new_playlist(), ids))
+        add_to.addAction("Nouvelle playlist…", lambda: self.new_playlist(ids))
         current = self._current_playlist()
         if current is not None and current["kind"] == "manual":
-            menu.addAction(f"Retirer de « {current['name']} »", lambda: self._remove_from(current["id"], ids))
+            menu.addAction(f"Retirer de « {current['name']} »\tSuppr", lambda: self._remove_from(current["id"], ids))
+        menu.addSeparator()
+        if len(ids) == 1:
+            menu.addAction("Remplacer le fichier…", lambda: self._replace(ids[0]))
+        menu.addAction(f"Supprimer de la bibliothèque…\t{'Maj+' if current else ''}Suppr",
+                       lambda: self._delete_tracks(ids))
         menu.exec(self.view.viewport().mapToGlobal(pos))
+
+    @staticmethod
+    def _copy(text: str):
+        QApplication.clipboard().setText(text)
+
+    def _copy_files(self, rows: list[int]):
+        data = QMimeData()
+        data.setUrls([QUrl.fromLocalFile(str(self._path(r))) for r in rows])
+        QApplication.clipboard().setMimeData(data)
+
+    def _play_selected(self):
+        rows = self._selected_rows()
+        if rows:
+            play(self._path(rows[0]), self)
+
+    def _delete_key(self):
+        ids = self._selected_ids()
+        current = self._current_playlist()
+        if not ids:
+            return
+        if current is not None and current["kind"] == "manual":
+            self._remove_from(current["id"], ids)
+        elif current is None:
+            self._delete_tracks(ids)
+
+    def _delete_tracks(self, ids: list[int]):
+        if not ids or QMessageBox.question(
+                self, "Supprimer", f"Supprimer {plural(len(ids), 'son')} de la bibliothèque ?\n\n"
+                "Les fichiers iront dans la corbeille ; ils disparaissent de toutes les playlists.") != QMessageBox.Yes:
+            return
+        raw = Path(self.lib.get_setting("raw_dir", ""))
+        errors = []
+        for rel in self.lib.delete_tracks(ids):
+            try:
+                if (raw / rel).exists():
+                    send2trash(str(raw / rel))
+            except OSError as e:
+                errors.append(f"{rel} : {e}")
+        for row in sorted((self._rows[i] for i in ids if i in self._rows), reverse=True):
+            self.model.removeRow(row)
+        self._rows = {self.model.item(r, 0).data(ID_ROLE): r for r in range(self.model.rowCount())}
+        self.refresh_tags()
+        self.refresh_playlists()
+        self.window().statusBar().showMessage(f"{plural(len(ids), 'son')} supprimé(s)", 5000)
+        if errors:
+            QMessageBox.warning(self, "Supprimer", "Fichiers non mis à la corbeille :\n" + "\n".join(errors[:15]))
 
     def _add_tags(self, ids: list[int]):
         text, ok = QInputDialog.getText(self, "Ajouter des tags",
@@ -348,6 +649,8 @@ class LibraryPanel(QWidget):
         if playlist_id is not None:
             self.lib.add_to_playlist(playlist_id, ids)
             self.refresh_playlists()
+            self.window().statusBar().showMessage(
+                f"{plural(len(ids), 'son')} ajouté(s) à « {self.lib.playlist(playlist_id)['name']} »", 5000)
 
     def _remove_from(self, playlist_id: int, ids: list[int]):
         self.lib.remove_from_playlist(playlist_id, ids)
@@ -394,8 +697,8 @@ class LibraryPanel(QWidget):
         self.window().statusBar().showMessage("Fichier remplacé", 5000)
 
     # --- export vers les logiciels DJ
-    def _export(self, selected: int | None = None):
-        if selected is None and self._current_playlist() is not None:
+    def export(self, selected: int | None = None, everything: bool = False):
+        if selected is None and not everything and self._current_playlist() is not None:
             selected = self._current_playlist()["id"]
         dlg = ExportDialog(self.lib, selected, self)
         if not dlg.exec():

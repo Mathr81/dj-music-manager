@@ -82,3 +82,24 @@ def test_invalid_rules_are_rejected(lib):
     with pytest.raises(ValueError):
         where({"rules": [{"field": "bpm", "op": ">=", "value": "rapide"}]})
     assert where({"rules": []}) == ("1", [])
+
+
+def test_duplicate_playlist_copies_order_without_source(lib):
+    a, b = ids(lib, "Papaoutai", "One More Time")
+    pid = lib.create_playlist("Set")
+    lib.add_to_playlist(pid, [a, b])
+    copy = lib.duplicate_playlist(pid, "Set (copie)")
+    assert lib.playlist_track_ids(copy) == [a, b]
+    assert lib.playlist(copy)["source_url"] is None
+    smart = lib.create_playlist("Rapides", {"match": "all", "rules": [{"field": "bpm", "op": ">=", "value": 130}]})
+    assert lib.playlist_track_ids(lib.duplicate_playlist(smart, "Rapides 2")) == lib.playlist_track_ids(smart)
+
+
+def test_delete_tracks_cleans_playlists_and_orphan_tags(lib):
+    a, b = ids(lib, "One More Time", "Aerodynamic")
+    pid = lib.create_playlist("Set")
+    lib.add_to_playlist(pid, [a, b])
+    lib.add_tags([a], ["solo"])
+    assert lib.delete_tracks([a]) == ["0.mp3"]
+    assert lib.track(a) is None and lib.playlist_track_ids(pid) == [b]
+    assert lib.tags() == []

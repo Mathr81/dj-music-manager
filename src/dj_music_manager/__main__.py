@@ -8,13 +8,16 @@ from PySide6.QtWidgets import QApplication
 from . import config
 from .importer import canonical_source
 from .library import Library
+from .ui import theme
 from .ui.main_window import MainWindow
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DJ Music Manager")
+    app.setOrganizationName("dj-music-manager")  # QSettings : taille de fenêtre, colonnes
     app.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.ico"))))
+    theme.apply(app)
     translator = QTranslator(app)  # boutons standard Qt en français (OK/Annuler…)
     if translator.load("qtbase_fr", QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
         app.installTranslator(translator)

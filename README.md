@@ -54,6 +54,8 @@ Connexion facultative (titres plus rapides avec ISRC, playlists privées) :
 
 Depuis février 2026, l'API officielle d'une app en mode développeur ne livre le contenu que des playlists **que tu
 possèdes ou co-édites**, même connectée : c'est ce qui rend la copie depuis l'app nécessaire pour les autres.
+Les playlists éditoriales et algorithmiques de Spotify (ID en `37i9dQZF…`) répondent même « 404 » : l'app passe
+alors, comme pour les autres playlists, par la page publique.
 Les téléchargements passent toujours par `/download?url=` et n'ont pas besoin de Spotify.
 
 Le quota de l'API Spotify d'une app en mode développeur est vite atteint (Spotify répond alors « 429 » avec une
@@ -84,7 +86,7 @@ par défaut. Un titre déjà dans la bibliothèque n'est pas retéléchargé.
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
 | `export.py` | export rekordbox.xml, crates Serato, M3U8, conversion FLAC → AIFF |
 | `quality/badge.py` | badge unique 128 / 192 / 256 / 320 / Lossless / Faux FLAC / Transcode |
-| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags) |
+| `ui/` | interface PySide6 (`library_panel.py` : playlists, filtres, tags ; `theme.py` : thème sombre) |
 
 Dédoublonnage : ID de la source (Deezer ou Spotify) → ISRC → artiste + titre normalisés ± 3 s.
 Jamais par nom de fichier.
@@ -110,6 +112,23 @@ le conflit est noté dans le journal de l'API.
   (titres absents) ; fichiers dont le contenu n'est pas le morceau demandé (bot et requête source).
 - Un même album/playlist reste une seule playlist, quel que soit le lien partagé (« ?si=… » de Spotify,
   `/intl-fr/`, `/fr/`…) ; les doublons créés avant ce correctif sont fusionnés au démarrage.
+
+## Interface
+
+Thème sombre. Taille de la fenêtre, colonnes (clic droit sur l'en-tête : afficher/masquer, ordre par glisser)
+et largeur de la colonne des playlists sont mémorisées. **F1** liste les raccourcis clavier.
+
+- **Clic droit sur des sons** : lire, afficher dans l'Explorateur, copier « Artiste – Titre », le chemin ou le
+  fichier lui-même, rechercher sur Spotify/YouTube/Beatport/SoundCloud/Deezer/Google, tags (dont *Tag rapide*),
+  playlists, remplacer le fichier, **supprimer de la bibliothèque** (fichier à la corbeille, Maj+Suppr).
+- **Glisser-déposer** : des sons sur une playlist manuelle de la colonne de gauche pour les y ajouter ; hors de
+  l'app (rekordbox, Explorateur…) comme de vrais fichiers. Double-clic ou Entrée : lecture.
+- **Clic droit sur une playlist** : resynchroniser avec sa source, ouvrir/copier le lien source, exporter, copier
+  la liste des titres, dupliquer, renommer (F2), supprimer (Suppr).
+- **File d'attente et Échecs** : clic droit pour relancer, chercher à la main (ou double-clic), copier le nom ou
+  l'erreur, chercher sur le web, afficher le fichier. Menu *Téléchargements* : relancer tous les échecs, retirer les
+  terminés. La barre des tâches clignote quand tout est téléchargé.
+- La barre du bas donne le nombre de sons et la durée affichés (et ceux de la sélection).
 
 ## Analyse qualité locale
 
