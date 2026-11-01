@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFile
                                QPushButton, QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
 from send2trash import send2trash
 
-from .. import bpm, config, export, manual
+from .. import bpm, config, export, key, manual
 from ..dedup import norm_text
 from ..library import Library
 from ..quality.badge import BADGES
@@ -33,13 +33,15 @@ SORT_ROLE = Qt.UserRole + 1
 ID_ROLE = Qt.UserRole + 2
 TAGS_ROLE = Qt.UserRole + 3
 PATH_ROLE = Qt.UserRole + 4
+KEY_ROLE = Qt.UserRole + 5  # tonalité en forme courte (« Am »), la colonne affiche le Camelot
 KIND_ROLE = Qt.UserRole + 1  # sur les éléments de la liste des playlists
 MIME_IDS = "application/x-djmm-track-ids"  # glisser des sons d'une vue à l'autre
 DURATION_WARNING = 10  # s d'écart avec la durée attendue : radio edit, clip, mauvaise version
 BADGE_COLORS = {"Lossless": "#5fd068", "320": "#a5d65a", "256": "#d8dc5a", "192": "#ffab40", "128": "#ff6b6b",
                 "Faux FLAC": "#ff6b6b", "Transcode": "#ff6b6b"}
-COLUMNS = ("#", "Artiste", "Titre", "Qualité", "Durée", "BPM", "Tags", "Format", "Album", "Ajouté le")
-COL_POS, COL_ARTIST, COL_TITLE, COL_QUALITY, COL_DURATION, COL_BPM, COL_TAGS, COL_ADDED = 0, 1, 2, 3, 4, 5, 6, 9
+COLUMNS = ("#", "Artiste", "Titre", "Qualité", "Durée", "BPM", "Tonalité", "Tags", "Format", "Album", "Ajouté le")
+COL_POS, COL_ARTIST, COL_TITLE, COL_QUALITY, COL_DURATION, COL_BPM, COL_KEY, COL_TAGS, COL_ADDED = 0, 1, 2, 3, 4, 5, 6, 7, 10
+HEADER_KEY = "library/header_v2"  # v2 : colonne Tonalité ; l'ancien état (une colonne de moins) est ignoré
 SEARCH_SITES = {
     "Spotify": "https://open.spotify.com/search/{}",
     "YouTube": "https://www.youtube.com/results?search_query={}",
@@ -69,6 +71,17 @@ def search_menu(menu: QMenu, query: str) -> QMenu:
     return sub
 
 
+def _key_item(k: str | None) -> QStandardItem:
+    """Camelot affiché (8A), couleur de sa case sur la roue, forme musicale en infobulle."""
+    code = key.camelot(k)
+    item = _item(code, key.camelot_sort(k))
+    item.setData(k, KEY_ROLE)
+    if code:
+        item.setToolTip(f"{k}  ·  Camelot {code}")
+        item.setForeground(QColor.fromHsv((int(code[:-1]) - 1) * 30, 140 if code.endswith("A") else 90, 255))
+    return item
+
+
 def _item(text, sort=None) -> QStandardItem:
     item = QStandardItem("" if text is None else str(text))
     item.setEditable(False)
@@ -83,8 +96,9 @@ class TrackFilter(QSortFilterProxyModel):
         super().__init__(sortRole=SORT_ROLE)
         self.lib = lib
         self.order: dict[int, int] | None = None  # ID -> position ; None = toute la bibliothèque
-        self.text = self.tag = self.badge = ""
+        self.text = self.tag = self.badge = self.key_label = ""
         self.bpm_min = self.bpm_max = 0
+        self.keys: set[str] | None = None  # filtre harmonique : tonalités compatibles avec un son
 
     def refilter(self):
         self.beginFilterChange()
@@ -99,6 +113,8 @@ class TrackFilter(QSortFilterProxyModel):
             return False
         bpm = m.item(row, COL_BPM).data(SORT_ROLE)
         if (self.bpm_min and bpm < self.bpm_min) or (self.bpm_max and not 0 < bpm <= self.bpm_max):
+            return False
+        if self.keys is not None and m.item(row, COL_KEY).data(KEY_ROLE) not in self.keys:
             return False
         if self.badge and m.item(row, COL_QUALITY).text() != self.badge:
             return False
@@ -174,8 +190,8 @@ class _Signals(QObject):
     export_progress = Signal(int, int)
     exported = Signal(object, str)  # résultat de export.run, message d'erreur
     cover_loaded = Signal(int, object)  # QImage déjà réduite
-    bpm_found = Signal(int, float)
-    bpm_done = Signal(int)
+    analyzed = Signal(int, object)  # ID du son, {"bpm": …, "key": …} trouvés
+    analysis_done = Signal(int)
 
 
 class LibraryPanel(QWidget):
@@ -190,11 +206,11 @@ class LibraryPanel(QWidget):
             lambda n, total: self.window().statusBar().showMessage(f"Conversion en AIFF : {n}/{total}…"))
         self._signals.exported.connect(self._on_exported)
         self._signals.cover_loaded.connect(self._on_cover)
-        self._signals.bpm_found.connect(self._on_bpm)
-        self._signals.bpm_done.connect(self._on_bpm_done)
+        self._signals.analyzed.connect(self._on_analyzed)
+        self._signals.analysis_done.connect(self._on_analysis_done)
         self._covers: dict[int, QPixmap] = {}
-        self._bpm_pool = ThreadPoolExecutor(2)  # décodage ffmpeg + numpy : 2 en parallèle suffisent
-        self._bpm_pending: set[int] = set()
+        self._analysis_pool = ThreadPoolExecutor(2)  # décodage ffmpeg + numpy : 2 en parallèle suffisent
+        self._analysis_pending: set[int] = set()
         self.player = None  # PlayerBar, fourni par la fenêtre principale
         self._playing: int | None = None
         self._rows: dict[int, int] = {}  # ID interne -> ligne du modèle source
@@ -273,7 +289,7 @@ class LibraryPanel(QWidget):
         header.setSectionsMovable(True)
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(self._header_menu)
-        for col, width in enumerate((40, 180, 250, 105, 75, 60, 160, 85, 180)):
+        for col, width in enumerate((40, 180, 250, 105, 75, 60, 95, 160, 85, 180)):
             self.view.setColumnWidth(col, width)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._track_menu)
@@ -312,7 +328,7 @@ class LibraryPanel(QWidget):
         self.refresh_playlists()
         self._restore_state()
         self._load_covers([t["id"] for t in lib.tracks()])
-        self.detect_bpm([t["id"] for t in lib.tracks() if not t["bpm"]])
+        self.analyze_audio([t["id"] for t in lib.tracks() if not (t["bpm"] and t["key"])])
 
     @staticmethod
     def _shortcut(widget: QWidget, keys, slot) -> QAction:
@@ -324,17 +340,17 @@ class LibraryPanel(QWidget):
     # --- état mémorisé (colonnes, séparateur)
     def _restore_state(self):
         s = QSettings()
-        if s.value("library/header") is not None:
-            self.view.horizontalHeader().restoreState(s.value("library/header"))
+        if s.value(HEADER_KEY) is not None:
+            self.view.horizontalHeader().restoreState(s.value(HEADER_KEY))
         if s.value("library/splitter") is not None:
             self.splitter.restoreState(s.value("library/splitter"))
 
     def close_workers(self):
-        self._bpm_pool.shutdown(wait=False, cancel_futures=True)
+        self._analysis_pool.shutdown(wait=False, cancel_futures=True)
 
     def save_state(self):
         s = QSettings()
-        s.setValue("library/header", self.view.horizontalHeader().saveState())
+        s.setValue(HEADER_KEY, self.view.horizontalHeader().saveState())
         s.setValue("library/splitter", self.splitter.saveState())
 
     def _header_menu(self, pos):
@@ -355,8 +371,8 @@ class LibraryPanel(QWidget):
             t = self.lib.track(track_id)
             self._set_row(t, [])
             self._load_covers([track_id])
-            if not t["bpm"]:
-                self.detect_bpm([track_id])
+            if not (t["bpm"] and t["key"]):
+                self.analyze_audio([track_id])
         self.refresh_playlists()  # compteurs et contenu de la playlist affichée
 
     # --- pochettes (lues et réduites en arrière-plan : décoder 500 JPEG sur le fil de l'UI la fige)
@@ -384,8 +400,8 @@ class LibraryPanel(QWidget):
         if row is not None:
             self.model.item(row, COL_TITLE).setIcon(QIcon(self._covers[track_id]))
 
-    # --- BPM : calculés quand le fichier n'en a pas (jamais écrits dans le fichier)
-    def detect_bpm(self, ids: list[int], force: bool = False):
+    # --- BPM et tonalité : calculés quand le fichier n'en a pas (jamais écrits dans le fichier)
+    def analyze_audio(self, ids: list[int], force: bool = False):
         try:
             ffmpeg, _ = config.ffmpeg_tools(self.lib.get_setting("ffmpeg_dir"))
         except FileNotFoundError:
@@ -393,30 +409,42 @@ class LibraryPanel(QWidget):
         raw = Path(self.lib.get_setting("raw_dir", ""))
         for track_id in ids:
             t = self.lib.track(track_id)
-            if t is None or track_id in self._bpm_pending or (t["bpm"] and not force):
+            if t is None or track_id in self._analysis_pending:
                 continue
-            self._bpm_pending.add(track_id)
-            self._bpm_pool.submit(self._detect_one, track_id, raw / t["path"], ffmpeg, t["duration"])
+            need = [f for f in ("bpm", "key") if force or not t[f]]
+            if need:
+                self._analysis_pending.add(track_id)
+                self._analysis_pool.submit(self._analyze_one, track_id, raw / t["path"], ffmpeg, t["duration"], need)
         self._update_stats()
 
-    def _detect_one(self, track_id: int, path: Path, ffmpeg: str, duration):
+    def _analyze_one(self, track_id: int, path: Path, ffmpeg: str, duration, need: list[str]):
         try:
-            found = bpm.detect(path, ffmpeg, duration)
-            if found:
-                self._signals.bpm_found.emit(track_id, found)
+            y = bpm.decode_excerpt(path, ffmpeg, duration)  # un seul décodage pour les deux
+            found = {f: (bpm.estimate if f == "bpm" else key.estimate)(y) for f in need}
+            self._signals.analyzed.emit(track_id, {f: v for f, v in found.items() if v})
         except Exception:
             pass  # shortcut: un échec n'est retenté qu'au prochain démarrage ; à mémoriser si ça devient gênant
         finally:
-            self._signals.bpm_done.emit(track_id)
+            self._signals.analysis_done.emit(track_id)
 
-    def _on_bpm(self, track_id: int, value: float):
-        self.set_bpm([track_id], value, refresh=False)
+    def _on_analyzed(self, track_id: int, found: dict):
+        if "bpm" in found:
+            self.set_bpm([track_id], found["bpm"], refresh=False)
+        if "key" in found:
+            self.lib.update_track(track_id, {"key": found["key"]})
+            row = self._rows.get(track_id)
+            if row is not None:
+                self.model.setItem(row, COL_KEY, _key_item(found["key"]))
 
-    def _on_bpm_done(self, track_id: int):
-        self._bpm_pending.discard(track_id)
-        if not self._bpm_pending:
+    def _on_analysis_done(self, track_id: int):
+        self._analysis_pending.discard(track_id)
+        if not self._analysis_pending:
             self.refresh_current()  # les playlists intelligentes sur le BPM se mettent à jour
         self._update_stats()
+
+    def show_compatible(self, k: str):
+        """Filtre harmonique : ne montre que les sons qui se mixent avec la tonalité k (roue Camelot)."""
+        self._set_filter(keys=key.compatible(k), key_label=key.camelot(k))
 
     def set_bpm(self, ids: list[int], value, refresh: bool = True):
         """value : un nombre, ou une fonction de l'ancien BPM (×2, ÷2)."""
@@ -461,7 +489,7 @@ class LibraryPanel(QWidget):
             title.setIcon(QIcon(self._covers[t["id"]]))
         items = [
             first, _item(t["artist"]), title, quality, duration,
-            _item(f"{t['bpm']:.0f}" if t["bpm"] else "", t["bpm"] or 0), self._tags_item(tags),
+            _item(f"{t['bpm']:.0f}" if t["bpm"] else "", t["bpm"] or 0), _key_item(t["key"]), self._tags_item(tags),
             _item(t["format"]), _item(t["album"]), _item(t["added_at"].replace("T", " "), t["added_at"]),
         ]
         items[COL_TITLE].setToolTip(t["path"])
@@ -501,8 +529,10 @@ class LibraryPanel(QWidget):
         text = f"{plural(n, 'son')} · {total(range(n))}"
         if n != self.model.rowCount():
             text += f"   (sur {self.model.rowCount()})"
-        if self._bpm_pending:
-            text += f"   —   calcul des BPM : {len(self._bpm_pending)} restant(s)"
+        if self.proxy.keys is not None:
+            text += f"   —   compatibles avec {self.proxy.key_label} (Échap pour tout revoir)"
+        if self._analysis_pending:
+            text += f"   —   analyse BPM et tonalité : {len(self._analysis_pending)} restant(s)"
         selected = self._selected_rows()
         if len(selected) > 1:
             text += f"   —   {plural(len(selected), 'sélectionné')} · {total(selected)}"
@@ -525,7 +555,7 @@ class LibraryPanel(QWidget):
         self.bpm_max.setValue(0)
         for w in (self.search, self.tag_filter, self.badge_filter, self.bpm_min, self.bpm_max):
             w.blockSignals(False)
-        self._set_filter(text="", tag="", badge="", bpm_min=0, bpm_max=0)
+        self._set_filter(text="", tag="", badge="", bpm_min=0, bpm_max=0, keys=None)
 
     def focus_search(self):
         self.search.setFocus()
@@ -704,7 +734,11 @@ class LibraryPanel(QWidget):
         tempo.addAction("Doubler (× 2)", lambda: self.set_bpm(ids, lambda b: b and b * 2))
         tempo.addAction("Diviser par 2 (÷ 2)", lambda: self.set_bpm(ids, lambda b: b and b / 2))
         tempo.addAction("Saisir…", lambda: self._ask_bpm(ids))
-        tempo.addAction("Recalculer", lambda: self.detect_bpm(ids, force=True))
+        tempo.addAction("Recalculer BPM et tonalité", lambda: self.analyze_audio(ids, force=True))
+        k = self.proxy.index(rows[0], COL_KEY).data(KEY_ROLE)
+        if len(ids) == 1 and k:
+            menu.addAction(icon("music"), f"Sons compatibles en harmonie ({key.camelot(k)})",
+                           lambda: self.show_compatible(k))
         menu.addSeparator()
         if len(ids) == 1:
             menu.addAction(icon("replace"), "Remplacer le fichier…", lambda: self._replace(ids[0]))

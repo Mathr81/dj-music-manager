@@ -118,3 +118,17 @@ def test_waveform_click_seeks(window):
     assert seeks == [pytest.approx(0.25, abs=0.01)]
     wave.set_progress(0.5)
     wave.grab()  # dessin avec les deux images en cache, sans erreur
+
+
+def test_key_column_and_harmonic_filter(window):
+    w, lib, _ = window
+    ids = [t["id"] for t in lib.tracks()]
+    for track_id, k in zip(ids, ("Am", "C", "F#")):  # 8A, 8B (relative), 2B (incompatible)
+        w.panel._on_analyzed(track_id, {"key": k})
+    assert lib.track(ids[0])["key"] == "Am"
+    col = [w.panel.proxy.index(r, 6).data() for r in range(3)]
+    assert sorted(col) == ["2B", "8A", "8B"]
+    w.panel.show_compatible("Am")
+    assert w.panel.proxy.rowCount() == 2 and "compatibles avec 8A" in w.panel.stats.text()
+    w.panel.clear_filters()
+    assert w.panel.proxy.rowCount() == 3

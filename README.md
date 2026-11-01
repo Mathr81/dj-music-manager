@@ -83,6 +83,7 @@ par défaut. Un titre déjà dans la bibliothèque n'est pas retéléchargé.
 | `files.py` | écriture dans RAW sans jamais écraser |
 | `tags.py` | lecture des tags et de la pochette (jamais d'écriture) |
 | `bpm.py` | détection du BPM (numpy) |
+| `key.py` | tonalité : détection, tags, roue Camelot |
 | `waveform.py` | forme d'onde 3 bandes du lecteur |
 | `smart.py` | règles des playlists intelligentes -> SQL paramétré |
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
@@ -150,7 +151,21 @@ dans le fichier, et part dans les exports (rekordbox, Serato).
 
 Sur 104 sons tagués de la bibliothèque : 89 à ±1 BPM, 13 à la moitié/au double (trap, reggaeton : convention de
 tempo), 2 faux. Clic droit → **BPM** : doubler, diviser par 2, saisir, recalculer. Menu *Bibliothèque* →
-*Calculer les BPM manquants*.
+*Calculer BPM et tonalités manquants*.
+
+## Tonalité
+
+Lue dans le tag du fichier (`TKEY`, `INITIALKEY` : notations « Am », « A minor », Camelot « 8A », Open Key
+« 1m ») ; sinon **calculée** avec le BPM, sur le même extrait (`key.py` : chromagramme — crête de chaque note,
+bruit large bande retiré — comparé aux profils de Krumhansl-Kessler, ~0,2 s par son). Rangée en forme courte
+(« Am »), affichée en **Camelot** (8A) avec la couleur de sa case sur la roue, exportée dans rekordbox.xml
+(`Tonality`).
+
+Clic droit sur un son → **Sons compatibles en harmonie** : la liste ne garde que la même case, les cases voisines
+(±1) et la relative (A ↔ B). Échap pour tout revoir.
+
+Aucune tonalité taguée dans la bibliothèque pour mesurer la précision ; sur 80 sons pris au hasard, les résultats
+se répartissent sur 22 des 24 tonalités. La comparaison avec l'analyse de rekordbox reste à faire.
 
 ## Analyse qualité locale
 

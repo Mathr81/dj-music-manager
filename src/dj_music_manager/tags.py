@@ -3,12 +3,16 @@
 from pathlib import Path
 
 import mutagen
+from mutagen.easyid3 import EasyID3
 from mutagen.easymp4 import EasyMP4Tags
 from mutagen.id3 import ID3
 
+from .key import parse as parse_key
+
 EasyMP4Tags.RegisterFreeformKey("isrc", "ISRC")  # M4A : ISRC en champ iTunes libre
+EasyID3.RegisterTextKey("initialkey", "TKEY")  # MP3 : tonalité, absente des clés « easy » par défaut
 # AIFF et WAV portent de l'ID3 brut : mutagen n'en a pas de variante « easy »
-ID3_FRAMES = {"artist": "TPE1", "title": "TIT2", "album": "TALB", "isrc": "TSRC", "bpm": "TBPM"}
+ID3_FRAMES = {"artist": "TPE1", "title": "TIT2", "album": "TALB", "isrc": "TSRC", "bpm": "TBPM", "initialkey": "TKEY"}
 
 
 def read_tags(path: Path) -> dict:
@@ -33,6 +37,7 @@ def read_tags(path: Path) -> dict:
         "album": first("album"),
         "isrc": first("isrc"),
         "bpm": bpm,
+        "key": parse_key(first("initialkey") or first("key")),  # FLAC/Vorbis : INITIALKEY ou KEY
         "duration": f.info.length,
         "format": Path(path).suffix.lstrip(".").lower(),
     }

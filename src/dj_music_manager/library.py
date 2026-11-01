@@ -73,11 +73,13 @@ MIGRATIONS = [
     "ALTER TABLE jobs ADD COLUMN file TEXT;",
     # titres Spotify déjà consultés (quota de l'API) ; shortcut: jamais expirés, les métadonnées bougent rarement
     "CREATE TABLE spotify_cache(id TEXT PRIMARY KEY, data TEXT NOT NULL);",
+    # v4 : tonalité, forme courte (« Am », « F# ») ; voir key.py
+    "ALTER TABLE tracks ADD COLUMN key TEXT;",
 ]
 
 api_log = logging.getLogger("dj_music_manager.api")  # anomalies des données renvoyées par l'API
 
-TRACK_FIELDS = ("path", "isrc", "artist", "title", "album", "duration", "expected_duration", "bpm", "format",
+TRACK_FIELDS = ("path", "isrc", "artist", "title", "album", "duration", "expected_duration", "bpm", "key", "format",
                 "quality", "source", "real_quality", "lossless", "max_frequency", "badge", "quality_origin")
 JOB_FIELDS = ("playlist_id", "position", "provider", "external_id", "url", "file", "artist", "title",
               "expected_duration", "quality")

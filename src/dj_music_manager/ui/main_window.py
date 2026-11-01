@@ -153,8 +153,8 @@ class MainWindow(QMainWindow):
         m.addAction("Nouvelle playlist intelligente…", "Ctrl+Shift+N", self.panel.new_smart).setIcon(icon("smart"))
 
         m.addSeparator()
-        m.addAction(icon("activity"), "Calculer les BPM manquants",
-                    lambda: self.panel.detect_bpm([t["id"] for t in self.lib.tracks()]))
+        m.addAction(icon("activity"), "Calculer BPM et tonalités manquants",
+                    lambda: self.panel.analyze_audio([t["id"] for t in self.lib.tracks()]))
 
         m = bar.addMenu("&Lecture")
         m.addAction("Lecture / pause", "Space", self.player.toggle).setIcon(icon("play"))

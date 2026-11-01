@@ -36,6 +36,7 @@ class Item:
     album: str
     duration: float
     bpm: float | None
+    key: str | None
     format: str
     tags: tuple[str, ...]
     added_at: str
@@ -58,7 +59,7 @@ def gather(lib: Library, playlist_ids: list[int], raw: Path) -> tuple[Playlists,
                 missing.append(f"{p['name']} : {t['artist']} – {t['title']}")
                 continue
             items.append(Item(t["id"], path, t["artist"] or "", t["title"] or path.stem, t["album"] or "",
-                              t["duration"] or 0.0, t["bpm"], (t["format"] or path.suffix[1:]).lower(),
+                              t["duration"] or 0.0, t["bpm"], t["key"], (t["format"] or path.suffix[1:]).lower(),
                               tuple(tags.get(track_id, [])), t["added_at"]))
         playlists.append((p["name"], items))
     return playlists, missing
@@ -139,7 +140,7 @@ def rekordbox_xml(playlists: Playlists, version: str = "") -> bytes:
         ET.SubElement(collection, "TRACK", {
             "TrackID": str(it.id), "Name": it.title, "Artist": it.artist, "Album": it.album,
             "Kind": KINDS.get(it.format, f"{it.format.upper()} File"), "Size": str(it.path.stat().st_size),
-            "TotalTime": str(round(it.duration)), "AverageBpm": f"{it.bpm or 0:.2f}",
+            "TotalTime": str(round(it.duration)), "AverageBpm": f"{it.bpm or 0:.2f}", "Tonality": it.key or "",
             "DateAdded": it.added_at[:10], "Comments": ", ".join(it.tags), "Location": file_uri(it.path),
         })
     nodes = ET.SubElement(root, "PLAYLISTS")

@@ -87,7 +87,7 @@ def replace_file(lib: Library, track_id: int, new_file: Path, raw: Path, ffmpeg:
     quality = _quality_fields(src, info["format"], ffmpeg, ffprobe)
     dest = src if in_raw else copy_into(raw, src)
     # on garde les métadonnées connues, le nouveau fichier ne complète que les champs vides
-    fields = {k: current[k] or info[k] for k in ("artist", "title", "album", "isrc", "bpm")}
+    fields = {k: current[k] or info[k] for k in ("artist", "title", "album", "isrc", "bpm", "key")}
     fields.update(quality, path=dest.relative_to(raw).as_posix(), format=info["format"],
                   duration=info["duration"], quality=None, source="manual")
     try:

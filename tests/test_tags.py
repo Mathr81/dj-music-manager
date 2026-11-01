@@ -3,7 +3,8 @@ import subprocess
 
 import pytest
 from mutagen.aiff import AIFF
-from mutagen.id3 import TBPM, TIT2, TPE1, TSRC
+from mutagen.flac import FLAC
+from mutagen.id3 import ID3, TBPM, TIT2, TKEY, TPE1, TSRC
 from mutagen.mp4 import MP4, MP4FreeForm
 
 from dj_music_manager.tags import read_tags
@@ -35,3 +36,20 @@ def test_m4a_isrc_is_read(tmp_path):
     m.tags["----:com.apple.iTunes:ISRC"] = [MP4FreeForm(b"GBDUW0000053")]
     m.save()
     assert read_tags(tmp_path / "x.m4a")["isrc"] == "GBDUW0000053"
+
+
+def test_key_tag_is_read_in_every_notation(tmp_path):
+    """TKEY (MP3, AIFF) et INITIALKEY (FLAC), écrits par rekordbox, Mixed In Key ou Traktor."""
+    mp3 = sine(tmp_path / "x.mp3")
+    tags = ID3()
+    tags.add(TKEY(encoding=3, text=["8A"]))
+    tags.save(mp3)
+    a = AIFF(sine(tmp_path / "x.aiff"))
+    a.add_tags()
+    a.tags.add(TKEY(encoding=3, text=["F#m"]))
+    a.save()
+    f = FLAC(sine(tmp_path / "x.flac"))
+    f["INITIALKEY"] = "Db"
+    f.save()
+    assert [read_tags(p)["key"] for p in (mp3, tmp_path / "x.aiff", tmp_path / "x.flac")] == ["Am", "F#m", "Db"]
+    assert read_tags(sine(tmp_path / "y.mp3"))["key"] is None
