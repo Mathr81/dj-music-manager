@@ -83,6 +83,7 @@ par défaut. Un titre déjà dans la bibliothèque n'est pas retéléchargé.
 | `files.py` | écriture dans RAW sans jamais écraser |
 | `tags.py` | lecture des tags et de la pochette (jamais d'écriture) |
 | `bpm.py` | détection du BPM (numpy) |
+| `waveform.py` | forme d'onde 3 bandes du lecteur |
 | `smart.py` | règles des playlists intelligentes -> SQL paramétré |
 | `quality/analysis.py` | analyse spectrale locale, portage numpy de whatsmybitrate |
 | `export.py` | export rekordbox.xml, crates Serato, M3U8, conversion FLAC → AIFF |
@@ -133,6 +134,9 @@ et largeur de la colonne des playlists sont mémorisées. **F1** liste les racco
 - **Lecteur intégré** en bas de la fenêtre : double-clic ou Entrée sur un son, **Espace** lecture/pause,
   **Ctrl+→ / Ctrl+←** suivant/précédent dans la liste affichée (triée et filtrée), barre de position, volume
   mémorisé. Enchaîne tout seul au son suivant.
+- **Forme d'onde** dans le lecteur, rendu 3 bandes façon rekordbox (graves bleus, médiums orange, aigus blancs),
+  partie jouée en couleurs, reste atténué ; clic ou glisser dessus pour se déplacer (`waveform.py`, ~0,5 s par son,
+  calculée en arrière-plan et gardée pour la session).
 - **Pochettes** : lues dans les fichiers (ID3, FLAC, MP4), en arrière-plan, affichées à côté du titre et dans le
   lecteur.
 - Tri alphabétique insensible aux accents et à la casse (« Été » avec les E), listes de sons et playlists.

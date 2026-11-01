@@ -35,11 +35,6 @@ def onset_envelope(y: np.ndarray) -> np.ndarray:
     return np.maximum(0, flux - local)
 
 
-def _ac_at(ac: np.ndarray, lag: float) -> float:
-    i = int(lag)
-    return ac[i] + (lag - i) * (ac[i + 1] - ac[i]) if i + 1 < len(ac) else 0.0
-
-
 def estimate(y: np.ndarray) -> float | None:
     if len(y) < SR * 10:
         return None
@@ -51,15 +46,15 @@ def estimate(y: np.ndarray) -> float | None:
     ac = np.fft.irfft(spectrum * np.conj(spectrum))[: len(env)]
     fps = SR / HOP
 
-    def score(bpm: float, multiples: int) -> float:  # peigne sur les multiples de la période
-        lag = 60 * fps / bpm
-        return sum(_ac_at(ac, lag * k) for k in range(1, multiples + 1))
+    def score(bpms: np.ndarray, multiples: int) -> np.ndarray:  # peigne sur les multiples de la période
+        lags = (60 * fps / bpms)[:, None] * np.arange(1, multiples + 1)
+        return np.interp(lags, np.arange(len(ac)), ac, right=0).sum(axis=1)
 
     coarse = np.arange(MIN_BPM, MAX_BPM, 0.5)
     prior = np.exp(-0.5 * np.log2(coarse / 125) ** 2)  # 174 plutôt que 87, 90 plutôt que 180
-    best = coarse[np.argmax([score(b, 4) * p for b, p in zip(coarse, prior)])]
+    best = coarse[np.argmax(score(coarse, 4) * prior)]
     fine = np.arange(best - 1, best + 1, 0.01)
-    bpm = float(fine[np.argmax([score(b, 16) for b in fine])])
+    bpm = float(fine[np.argmax(score(fine, 16))])
     return float(round(bpm)) if abs(bpm - round(bpm)) < 0.15 else round(bpm, 1)
 
 

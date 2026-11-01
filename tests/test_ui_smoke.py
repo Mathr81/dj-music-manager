@@ -101,3 +101,20 @@ def test_bpm_double_half_and_player_steps(window):
     w.panel.play_step(-1)
     first, second = (w.panel.proxy.index(r, 2).data() for r in (0, 1))
     assert played == [first, second, first]
+
+
+def test_waveform_click_seeks(window):
+    import numpy as np
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    w, *_ = window
+    wave = w.player.wave
+    wave.resize(400, 44)
+    wave.set_data(np.tile(np.linspace(0, 1, 800, dtype=np.float32)[:, None], (1, 3)))
+    seeks = []
+    wave.seek.connect(seeks.append)
+    QTest.mouseClick(wave, Qt.LeftButton, pos=QPoint(100, 20))
+    assert seeks == [pytest.approx(0.25, abs=0.01)]
+    wave.set_progress(0.5)
+    wave.grab()  # dessin avec les deux images en cache, sans erreur

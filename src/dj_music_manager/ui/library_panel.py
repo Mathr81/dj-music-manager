@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version
 from pathlib import Path
@@ -11,7 +12,7 @@ from urllib.parse import quote_plus
 
 from PySide6.QtCore import (QByteArray, QItemSelectionModel, QMimeData, QObject, QSettings, QSize,
                             QSortFilterProxyModel, Qt, QUrl, Signal)
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPixmap, QKeySequence, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QPixmap, QKeySequence, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget)
@@ -172,7 +173,7 @@ class _Signals(QObject):
     replaced = Signal(int, str)  # ID du son, message d'erreur (vide si réussi)
     export_progress = Signal(int, int)
     exported = Signal(object, str)  # résultat de export.run, message d'erreur
-    cover_loaded = Signal(int, bytes)
+    cover_loaded = Signal(int, object)  # QImage déjà réduite
     bpm_found = Signal(int, float)
     bpm_done = Signal(int)
 
@@ -358,27 +359,27 @@ class LibraryPanel(QWidget):
                 self.detect_bpm([track_id])
         self.refresh_playlists()  # compteurs et contenu de la playlist affichée
 
-    # --- pochettes (lues dans les fichiers, en arrière-plan)
+    # --- pochettes (lues et réduites en arrière-plan : décoder 500 JPEG sur le fil de l'UI la fige)
     def _load_covers(self, ids: list[int]):
         raw = Path(self.lib.get_setting("raw_dir", ""))
         paths = [(i, raw / t["path"]) for i in ids if (t := self.lib.track(i))]
 
         def work():
             for track_id, path in paths:
+                time.sleep(0.01)  # cède le GIL : lecteur et forme d'onde restent réactifs pendant le chargement
                 try:
                     data = cover(path)
                 except Exception:
                     data = None  # fichier absent ou illisible : pas de pochette
-                if data:
-                    self._signals.cover_loaded.emit(track_id, data)
+                image = QImage.fromData(data) if data else QImage()
+                if not image.isNull():
+                    self._signals.cover_loaded.emit(
+                        track_id, image.scaled(128, 128, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_cover(self, track_id: int, data: bytes):
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(data):
-            return
-        self._covers[track_id] = pixmap.scaled(128, 128, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    def _on_cover(self, track_id: int, image: QImage):
+        self._covers[track_id] = QPixmap.fromImage(image)
         row = self._rows.get(track_id)
         if row is not None:
             self.model.item(row, COL_TITLE).setIcon(QIcon(self._covers[track_id]))

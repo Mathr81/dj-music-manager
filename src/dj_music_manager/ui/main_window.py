@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.queue_tab, icon("download"), "File d'attente")
         self.tabs.addTab(self._failures_tab(), icon("alert"), "Échecs")
 
-        self.player = PlayerBar()
+        self.player = PlayerBar(lambda: config.ffmpeg_tools(self.lib.get_setting("ffmpeg_dir"))[0])
         self.panel.player = self.player
         self.player.next_requested.connect(lambda: self.panel.play_step(1))
         self.player.previous_requested.connect(lambda: self.panel.play_step(-1))
