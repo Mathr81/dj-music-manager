@@ -196,6 +196,7 @@ class _Signals(QObject):
 
 class LibraryPanel(QWidget):
     resync_requested = Signal(str)  # lien source d'une playlist importée
+    redownload_requested = Signal(list, str)  # ID des sons, qualité
 
     def __init__(self, lib: Library, parent=None):
         super().__init__(parent)
@@ -367,12 +368,11 @@ class LibraryPanel(QWidget):
     # --- lignes
     def show_track(self, track_id: int):
         """Affiche un son arrivé dans la bibliothèque (téléchargé ou ajouté à la main)."""
-        if track_id not in self._rows:
-            t = self.lib.track(track_id)
-            self._set_row(t, [])
-            self._load_covers([track_id])
-            if not (t["bpm"] and t["key"]):
-                self.analyze_audio([track_id])
+        t = self.lib.track(track_id)  # déjà affiché : retéléchargé, la ligne se met à jour
+        self._set_row(t, self.lib.tags_by_track().get(track_id, []))
+        self._load_covers([track_id])
+        if not (t["bpm"] and t["key"]):
+            self.analyze_audio([track_id])
         self.refresh_playlists()  # compteurs et contenu de la playlist affichée
 
     # --- pochettes (lues et réduites en arrière-plan : décoder 500 JPEG sur le fil de l'UI la fige)
@@ -740,6 +740,9 @@ class LibraryPanel(QWidget):
             menu.addAction(icon("music"), f"Sons compatibles en harmonie ({key.camelot(k)})",
                            lambda: self.show_compatible(k))
         menu.addSeparator()
+        again = menu.addMenu(icon("download"), "Retélécharger en")
+        for quality, label in (("flac", "FLAC"), ("mp3_320", "MP3 320"), ("mp3_128", "MP3 128")):
+            again.addAction(label, lambda q=quality: self.redownload_requested.emit(ids, q))
         if len(ids) == 1:
             menu.addAction(icon("replace"), "Remplacer le fichier…", lambda: self._replace(ids[0]))
         menu.addAction(icon("trash"), f"Supprimer de la bibliothèque…\t{'Maj+' if current else ''}Suppr",

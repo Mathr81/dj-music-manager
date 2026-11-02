@@ -1,5 +1,6 @@
 """Parcours complet : aperçu -> téléchargement -> dédoublonnage -> réimport, API simulées."""
 
+import os
 import shutil
 import subprocess
 
@@ -113,3 +114,30 @@ def test_match_by_normalized_artist_title_and_duration(env):
     assert created
     assert lib.find_track(None, "Daft Punk feat. Romanthony", "One More Time (Original Mix)", 322) == track_id
     assert lib.find_track(None, "Daft Punk", "One More Time", 330) is None  # hors ±3 s
+
+
+def test_redownload_replaces_file_and_keeps_track(env, monkeypatch):
+    lib, api, deezer, raw, downloads = env
+    trashed = []
+    monkeypatch.setattr("dj_music_manager.manual.send2trash", lambda p: (trashed.append(p), os.remove(p)))
+    (raw / "Daft Punk - One More Time.mp3").write_bytes(b"ancien")
+    track_id, _ = lib.add_track({"path": "Daft Punk - One More Time.mp3", "artist": "Daft Punk",
+                                 "title": "One More Time", "duration": 2, "bpm": 123, "key": "Am",
+                                 "format": "mp3", "quality": "mp3_128", "source": "deezer"}, "deezer", "1")
+    playlist_id = lib.create_playlist("Set")
+    lib.add_to_playlist(playlist_id, [track_id])
+    lib.add_tags([track_id], ["warmup"])
+
+    [job_id] = importer.redownload(lib, [track_id], "flac")
+    run(lib, api, [job_id])
+
+    assert downloads == ["1"]  # par l'ID Deezer connu
+    assert lib.job(job_id)["status"] == "done"
+    [t] = lib.tracks()
+    assert t["id"] == track_id
+    assert (t["path"], t["format"], t["quality"], t["badge"]) == ("Daft Punk - One More Time.flac", "flac", "flac",
+                                                                   "Lossless")
+    assert (t["bpm"], t["key"]) == (123, "Am")  # valeurs connues gardées
+    assert lib.playlist_track_ids(playlist_id) == [track_id] and lib.tags_by_track()[track_id] == ["warmup"]
+    assert [f.name for f in raw.iterdir()] == ["Daft Punk - One More Time.flac"]
+    assert len(trashed) == 1

@@ -231,6 +231,20 @@ def match_collection(entries: list[dict], tracks: list[dict]) -> tuple[dict[str,
     return matched, remaining
 
 
+def redownload(lib: Library, track_ids: list[int], quality: str) -> list[int]:
+    """Jobs qui retéléchargent des sons déjà présents : par leur ID Deezer, sinon leur lien Spotify,
+    sinon une recherche artiste + titre (sons ajoutés à la main)."""
+    jobs = []
+    for track_id in track_ids:
+        t, ext = lib.track(track_id), lib.externals(track_id)
+        provider = "deezer" if "deezer" in ext else "spotify" if "spotify" in ext else "manual"
+        jobs.append({"provider": provider, "external_id": ext.get(provider),
+                     "url": f"https://open.spotify.com/track/{ext['spotify']}" if provider == "spotify" else None,
+                     "artist": t["artist"], "title": t["title"], "expected_duration": t["duration"],
+                     "quality": quality, "replace_track": track_id})
+    return lib.add_jobs(jobs)
+
+
 def queue(lib: Library, p: Preview, quality: str) -> list[int]:
     """Crée/maj la playlist (références, jamais de copie) et renvoie les ID des jobs à lancer."""
     playlist_id = None

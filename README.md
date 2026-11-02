@@ -197,6 +197,11 @@ analysé ; l'ancien part dans la corbeille Windows. Les métadonnées connues so
 complète que les champs vides. Avant de remplacer, l'app prévient si le fichier ressemble à un autre son de la
 bibliothèque ou si sa durée diffère de plus de 10 s.
 
+Pour changer de qualité sans chercher de fichier : sélectionne un ou plusieurs sons, clic droit → **Retélécharger
+en** FLAC, MP3 320 ou MP3 128. Chaque son passe par la file d'attente (par son ID Deezer, sinon son lien Spotify,
+sinon une recherche artiste + titre pour les sons ajoutés à la main) et son fichier est remplacé de la même façon :
+playlists, tags, BPM et tonalité suivent, l'ancien fichier part à la corbeille une fois le nouveau arrivé.
+
 ## Export vers les logiciels DJ
 
 Bouton **Exporter pour logiciel DJ…** sous les playlists (ou clic droit sur une playlist → *Exporter…*).

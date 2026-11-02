@@ -132,3 +132,29 @@ def test_key_column_and_harmonic_filter(window):
     assert w.panel.proxy.rowCount() == 2 and "compatibles avec 8A" in w.panel.stats.text()
     w.panel.clear_filters()
     assert w.panel.proxy.rowCount() == 3
+
+
+def test_redownload_menu_and_row_refresh(window, monkeypatch):
+    w, lib, _ = window
+    shown = []
+
+    class Menu(library_panel.QMenu):
+        def exec(self, *_):
+            shown.append(self)
+
+    monkeypatch.setattr(library_panel, "QMenu", Menu)
+    monkeypatch.setattr(w, "_ensure_api", lambda: False)  # pas de clé API : la fenêtre ouvrirait les réglages
+    requested = []
+    w.panel.redownload_requested.connect(lambda ids, q: requested.append((sorted(ids), q)))
+    w.panel.view.selectAll()
+    w.panel._track_menu(w.panel.view.rect().center())
+    again = next(a.menu() for a in shown[0].actions() if a.text() == "Retélécharger en")
+    next(a for a in again.actions() if a.text() == "FLAC").trigger()
+    assert requested == [(sorted(t["id"] for t in lib.tracks()), "flac")]
+    # le son retéléchargé change de fichier : sa ligne se met à jour
+    t = lib.tracks()[0]
+    lib.update_track(t["id"], {"format": "flac", "badge": "Lossless"})
+    w.panel.show_track(t["id"])
+    assert w.panel.proxy.rowCount() == 3
+    row = w.panel._rows[t["id"]]
+    assert w.panel.model.item(row, library_panel.COL_QUALITY).text() == "Lossless"

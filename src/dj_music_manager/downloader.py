@@ -9,6 +9,7 @@ from .api_client import ApiClient, ApiError, log
 from .dedup import norm_key, titles_match
 from .importer import match_collection, parse_duration
 from .library import Library
+from .manual import swap_file
 from .quality.badge import badge
 from .tags import read_tags
 
@@ -85,7 +86,8 @@ class Downloader:
         self.on_event("status", job_id, None)
         try:
             # déjà arrivé entre-temps (même piste dans un autre import) ?
-            track_id = self.lib.track_by_external(job["provider"], job["external_id"])
+            track_id = None if job["replace_track"] else self.lib.track_by_external(job["provider"],
+                                                                                     job["external_id"])
             if track_id is None:
                 track_id = self._download(job)
             if job["playlist_id"]:
@@ -122,18 +124,23 @@ class Downloader:
             quality = job["quality"]
             if quality == "flac" and info["format"] == "mp3":
                 quality = "mp3_320"  # le bot de secours ne fournit que du MP3 320
-            track_id, created = self.lib.add_track({
-                **info,
-                "path": dl.path.relative_to(raw).as_posix(),
+            fields = {
                 "expected_duration": job["expected_duration"],
                 "quality": quality,
-                "source": job["provider"],
                 "real_quality": dl.real_quality,
                 "lossless": dl.lossless,
                 "max_frequency": dl.max_frequency,
                 "badge": badge(dl.real_quality, dl.lossless, info["format"]),
                 "quality_origin": "api",
-            }, job["provider"], job["external_id"])
+            }
+            if job["replace_track"]:  # retéléchargement : même son (playlists, tags, BPM), nouveau fichier
+                name = (raw / self.lib.track(job["replace_track"])["path"]).with_suffix(dl.path.suffix).name
+                swap_file(self.lib, job["replace_track"], dl.path, raw, info, fields, name)
+                track_id, created = job["replace_track"], True
+            else:
+                track_id, created = self.lib.add_track({
+                    **info, **fields, "path": dl.path.relative_to(raw).as_posix(), "source": job["provider"],
+                }, job["provider"], job["external_id"])
         except BaseException:
             dl.path.unlink(missing_ok=True)  # fichier illisible : pas d'orphelin dans RAW
             raise

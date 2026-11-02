@@ -75,6 +75,8 @@ MIGRATIONS = [
     "CREATE TABLE spotify_cache(id TEXT PRIMARY KEY, data TEXT NOT NULL);",
     # v4 : tonalité, forme courte (« Am », « F# ») ; voir key.py
     "ALTER TABLE tracks ADD COLUMN key TEXT;",
+    # v5 : retéléchargement d'un son déjà présent (autre qualité) : son fichier sera remplacé, son ID gardé
+    "ALTER TABLE jobs ADD COLUMN replace_track INTEGER REFERENCES tracks ON DELETE SET NULL;",
 ]
 
 api_log = logging.getLogger("dj_music_manager.api")  # anomalies des données renvoyées par l'API
@@ -82,7 +84,7 @@ api_log = logging.getLogger("dj_music_manager.api")  # anomalies des données re
 TRACK_FIELDS = ("path", "isrc", "artist", "title", "album", "duration", "expected_duration", "bpm", "key", "format",
                 "quality", "source", "real_quality", "lossless", "max_frequency", "badge", "quality_origin")
 JOB_FIELDS = ("playlist_id", "position", "provider", "external_id", "url", "file", "artist", "title",
-              "expected_duration", "quality")
+              "expected_duration", "quality", "replace_track")
 
 
 def _now() -> str:
@@ -194,6 +196,11 @@ class Library:
         with self._tx() as db:
             db.execute(f"UPDATE tracks SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?",
                        (*values.values(), track_id))
+
+    def externals(self, track_id: int) -> dict[str, str]:
+        """ID externes d'un son, par fournisseur (deezer, spotify)."""
+        return {r["provider"]: r["external_id"]
+                for r in self._all("SELECT provider, external_id FROM external_ids WHERE track_id = ?", track_id)}
 
     def track_by_path(self, path: str) -> int | None:
         row = self._one("SELECT id FROM tracks WHERE path = ?", path)

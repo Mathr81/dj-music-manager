@@ -86,21 +86,34 @@ def replace_file(lib: Library, track_id: int, new_file: Path, raw: Path, ffmpeg:
     info = read_tags(src)
     quality = _quality_fields(src, info["format"], ffmpeg, ffprobe)
     dest = src if in_raw else copy_into(raw, src)
-    # on garde les métadonnées connues, le nouveau fichier ne complète que les champs vides
-    fields = {k: current[k] or info[k] for k in ("artist", "title", "album", "isrc", "bpm", "key")}
-    fields.update(quality, path=dest.relative_to(raw).as_posix(), format=info["format"],
-                  duration=info["duration"], quality=None, source="manual")
     try:
-        lib.update_track(track_id, fields)
+        return swap_file(lib, track_id, dest, raw, info, {**quality, "quality": None, "source": "manual"}, src.name,
+                         trash)
     except BaseException:
         if dest != src:
             dest.unlink(missing_ok=True)
         raise
-    if old.exists():
-        trash(str(old))  # récupérable depuis la corbeille Windows
-        clean = raw / src.name
-        if dest != src and dest.name != src.name and not clean.exists():
+
+
+def swap_file(lib: Library, track_id: int, dest: Path, raw: Path, info: dict, extra: dict, name: str,
+              trash=None) -> Path:
+    """Fait pointer le son vers dest (déjà dans RAW) ; l'ancien fichier part à la corbeille.
+    Les métadonnées connues sont gardées, le nouveau fichier ne complète que les champs vides."""
+    current = lib.track(track_id)
+    old = raw / current["path"]
+    fields = {k: current[k] or info[k] for k in ("artist", "title", "album", "isrc", "bpm", "key")}
+    fields.update(extra, path=dest.relative_to(raw).as_posix(), format=info["format"], duration=info["duration"])
+    lib.update_track(track_id, fields)
+    if not old.exists():
+        return dest
+    # le son pointe déjà vers dest : une erreur de fichier ici ne doit plus remonter (dest serait effacé)
+    try:
+        (trash or send2trash)(str(old))  # récupérable depuis la corbeille Windows
+        clean = raw / name
+        if dest.name != name and not clean.exists():
             os.rename(dest, clean)  # « Titre (2).mp3 » ne gênait que tant que l'ancien était là
+            lib.update_track(track_id, {"path": clean.relative_to(raw).as_posix()})
             dest = clean
-            lib.update_track(track_id, {"path": dest.relative_to(raw).as_posix()})
+    except OSError:
+        pass  # shortcut: ancien fichier verrouillé (en lecture ailleurs) laissé dans RAW, à jeter à la main
     return dest

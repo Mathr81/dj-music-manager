@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.panel = LibraryPanel(lib)
         self.panel.resync_requested.connect(self._resync)
+        self.panel.redownload_requested.connect(self._redownload)
         self.bridge.track_added.connect(self.panel.show_track)
         self.tabs.addTab(self.panel, icon("library"), "Bibliothèque")
         self.queue_tab = self._queue_tab()
@@ -202,6 +203,12 @@ class MainWindow(QMainWindow):
     def _resync(self, url: str):
         self.link.setText(url)
         self._analyze()
+
+    def _redownload(self, track_ids: list[int], quality: str):
+        if self._ensure_api():
+            self.downloader.submit(importer.redownload(self.lib, track_ids, quality))
+            self.statusBar().showMessage(f"{len(track_ids)} son(s) à retélécharger en {quality} : "
+                                         "l'ancien fichier part à la corbeille une fois le nouveau arrivé", 8000)
 
     def _open_dir(self, path):
         if path and Path(path).is_dir():
